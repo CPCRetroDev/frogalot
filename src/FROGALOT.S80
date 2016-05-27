@@ -1,0 +1,4417 @@
+; ===========================
+;
+; FFFFF
+; F     RRRR
+; FFF   R   R  OOO
+; F     RRRR  O   O  GGGG
+; F     R   R O   O G
+;       R   R O   O G GGG
+;              OOO  G   G
+;      AAA           GGG
+;     A   A L
+;     AAAAA L      OOO
+;     A   A L     O   O TTTTT
+;     A   A L     O   O   T
+;           LLLLL O   O   T
+;                  OOO    T
+;                         T
+;
+; ---------------------------
+; por  CESAR NICOLAS GONZALEZ
+; V.1 [2015/09/13-2015/10/23]
+; para CPC RETRODEV '15 (PRO)
+; ===========================
+; usar ensamblador AS80 1.42:
+; ==== AS80 -inzx3 -lNUL ====
+
+load = $0400
+type = 2
+exec = boot
+
+; CABECERA DE AMSDOS GENERICA
+ org load-$80
+ ds 18
+ db type
+ dw 0,load
+ ds 1
+ dw last-load,exec
+ ds 36
+ dw last-load
+ ds 1
+ dw type+(lo load)+(hi load)+2*(lo(last-load))+2*(hi(last-load))+(lo exec)+(hi exec)
+ ds 59
+
+boot ; RUN!
+
+; ==== MAPA DE MEMORIA ====
+; $0000-$003F: TABLA DE INTERRUPCIONES DEL Z80
+; $0040-$01FF: PILA DEL Z80
+; $0200-$02FF: TABLA PRECALCULADA: MASCARA DE SPRITES
+; $0300-$03FF: TABLA PRECALCULADA: REFLEJO DE SPRITES
+; $0400-$7FFF: CODIGO Y DATOS
+; $8000-$BFFF: VRAM (LO)
+; $C000-$FFFF: VRAM (HI) + DATOS TEMPORALES
+
+; ==== PREPARACION DEL SISTEMA ====
+
+keymap ; el arranque solamente se usa una vez: puede ser sobreescrito
+
+ di
+ im 1
+ ld hl,int7
+ ld ($39),hl ; [$0038]=$C3
+ ld sp,$0200
+
+; ---- tabla RST (cfr. tower_draw) ----
+
+ ld a,$21 ; "LD HL,$XXXX"
+ ld ($10),a
+ ld ($18),a
+ ld ($20),a
+ ld ($28),a
+ ld hl,tower_gf00
+ ld ($11),hl
+ ld hl,tower_gf01
+ ld ($19),hl
+ ld hl,tower_gf10
+ ld ($21),hl
+ ld hl,tower_gf11
+ ld ($29),hl
+ ld hl,$E9E3 ; "EX HL,(SP): JP (HL)"
+ ld ($13),hl
+ ld ($1B),hl
+ ld ($23),hl
+ ld ($2B),hl
+ ld hl,$C3E1 ; "POP HL: JP $XXXX"
+ ld ($30),hl
+ ld hl,tower_jump
+ ld ($32),hl
+
+; ---- tabla MASK+FLIP (cfr sprite_draw) ----
+ ld hl,$0200
+ ld de,$AA55
+maskflip ;
+ ld a,l
+ and d
+ ld b,a
+ jr z,$+3
+ ld a,d
+ ld c,a
+ ld a,l
+ and e
+ jr z,$+3
+ ld a,e
+ or c
+ cpl
+ ld (hl),a
+ inc h
+ rrc b
+ ld a,l
+ and e
+ rlca
+ or b
+ ld (hl),a
+ dec h
+ inc l
+ jr nz,maskflip
+
+; ---- ocultar pantalla ----
+ ld bc,$BC06
+ out (c),c
+ inc b
+ dw $71ED
+
+; ---- preparar pantalla ----
+ ld hl,$C000
+ call panel
+ ld hl,$C600
+ call panel
+ ld hl,$C100
+ ld bc,$A002
+ ld a,$0C
+ push bc
+ call box
+ ld hl,$C13C
+ pop bc
+ call box
+ call cls
+ ld hl,textinit
+ call printfull
+ xor a
+ ld (textscore_),a
+ ld (texthiscore_),a
+
+; ---- mostrar pantalla ----
+ ld bc,$7F8C+0
+ out (c),c
+ ld c,$11
+ ld hl,inks+$11
+ dec hl
+ dec c
+ ld a,(hl)
+ out (c),c
+ out (c),a
+ jr nz,$-7
+ ld bc,$BC01
+ ld hl,$202A
+ call crtcpair
+ ld c,$06
+ ld hl,$181E+$0402
+ call crtcpair
+ ld c,$0C+1
+ out (c),c
+ inc b
+ dw $71ED
+
+ call chip_init
+ ei
+
+; ==== PRESENTACION ====
+
+menu_init ld a,-1
+ ld (menu_loop+1),a
+ ld a,0
+ inc a
+ ld ($-2),a
+ call tower_setmap
+ ld a,$8A
+ call tower_setink
+ ld hl,menusong
+ ld (int7_song),hl
+
+ ld de,0
+game_score = $-2
+ ld hl,$1000
+game_hiscore = $-2
+ and a
+ sbc hl,de
+ jr nc,game_noscore
+ ld (game_hiscore),de
+game_noscore call update_hiscore
+
+ call fullenergy
+ ld hl,textmenu
+ call printfull ; firma de un servidor
+
+menu_loop ld a,0
+ inc a
+ ld (menu_loop+1),a
+ push af
+ call z,cls
+ call frame_init
+ pop af
+ add a
+ jr nc,menu_loopdemo
+ jr nz,menu_loopinfo_
+ ld hl,$C100+4
+ ld bc,$201C
+ ld a,$0C
+ call box
+ ld hl,$C500+4
+ ld b,hi $201C
+; ld a,$0C
+ call box
+ ld hl,$C200+4
+ ld bc,$601C
+ ld a,$C0
+ call box
+
+ ld a,-1
+ inc a
+ ld ($-2),a
+ and 3
+ ld hl,textinfo1
+ jr z,menu_loopinfo
+ dec a
+ ld hl,textinfo2
+ jr z,menu_loopinfo
+ dec a
+ ld hl,textinfo3
+ jr z,menu_loopinfo
+ ld hl,textinfo4
+menu_loopinfo call printfull
+menu_loopinfo_ jr menu_loopdemo_
+
+menu_loopdemo ; ---- movimiento de la torre ----
+
+menu_demo1 ld hl,$0000
+ ld de,$0000
+ ld a,l
+ add e
+ ld l,a
+ cp 50
+ inc e
+ jr c,$+4
+ dec e
+ dec e
+ ld a,h
+ add d
+ ld h,a
+ cp 60
+ inc d
+ jr c,$+4
+ dec d
+ dec d
+ ld (menu_demo1+1),hl
+ ld (menu_demo1+4),de
+ rr h
+ rr l
+ call tower_draw
+
+; ---- movimiento de los sprites ----
+
+menu_demo2 ld de,18+44*256
+ ld c,0
+ ld hl,frogalot
+ call menu_demologo
+ ld a,d
+ ld (menu_demo2+2),a
+ ld a,c
+ ld (menu_demo2+4),a
+ call menu_demologo
+ call menu_demologo
+ call menu_demologo
+
+menu_loopdemo_ ; ---- comprobar teclas, etc. ----
+
+ ld a,2
+ call frame_exit
+
+ call keys_fire
+ jp nz,menu_loop
+ call wait_fire_
+
+ ld a,1
+ ld (game_round),a
+ ld a,3
+ ld (game_lives),a
+ ld hl,0
+ ld (game_score),hl
+ call update_score
+
+; ==== EMPIEZA EL JUEGO ====
+
+game_init ld hl,zerosong
+ ld (int7_song),hl
+ call cls
+
+ ld hl,gametext
+ ld de,gametextround
+ ld a,-1
+game_round = $-1
+ call decimal_char
+ ld de,gametextlives
+ ld a,-1
+game_lives = $-1
+ call decimal_char
+ call printfull
+
+ ld a,(game_round)
+ dec a
+ push af
+ call tower_setmap
+ pop af
+ add a
+ add a
+ and levels_-levels-1
+ add lo levels
+ ld l,a
+ adc hi levels
+ sub l
+ ld h,a
+ ld e,(hl)
+ inc hl
+ ld d,(hl)
+ inc hl
+ ld c,(hl) ; altura
+ inc hl
+ ld a,(hl) ; color
+ push de
+ call tower_setink
+ pop ix
+ ld de,tiletable
+ ld iy,spritemap
+ xor a
+; relleno de seguridad (sprites)
+ ld (iy),a
+ inc yl
+ jr nz,$-5
+ ld b,a ; relleno de seguridad (superior)
+ ld (de),a
+ inc e
+ ld (de),a
+ inc de
+ djnz $-4 ; B=0
+ ld a,c
+game_buildtower ld c,0 ; POS.X
+ push af
+game_buildtower_ ld a,(ix)
+ rrca
+ rrca
+ rrca
+ rrca
+ call game_buildatile
+ inc de
+ inc c
+ ld a,(ix)
+ call game_buildatile
+ inc de
+ inc c
+ inc ix
+ bit 4,c
+ jr z,game_buildtower_
+ inc b
+ pop af
+ cp b
+ jr nz,game_buildtower
+
+ ld c,b
+ ld a,$0C ; base de la torre
+ ld b,16
+ ld (de),a
+ inc de
+ djnz $-2
+ xor a
+ ld b,a ; relleno de seguridad (inferior)
+ ld (de),a
+ inc e
+ ld (de),a
+ inc de
+ djnz $-4
+
+; colocar a Lanzarote (-8) y Ginebra (-16)
+ ld a,c
+ sub 3
+ ld l,a
+ ld h,0
+ add hl,hl
+ add hl,hl
+ add hl,hl
+ inc h
+ ld (spritemap_+3-8),hl
+ ld hl,(32-3)*8
+ ld (spritemap_+3-16),hl
+ ld a,2*8;2*16
+ ld (spritemap_+1-8),a
+ ld a,2*23
+ ld (spritemap_+1-16),a
+ ld a,5
+ ld (spritemap_+0-16),a
+ ld a,3*8
+ ld (spritemap_+5-16),a
+
+ call wait_fire
+
+ ld hl,gamesong
+ ld (int7_song),hl
+ call fullenergy
+ ld hl,ultimatesfx
+ ld (int7_chan),hl
+
+; ==== TURNOS DEL JUEGO ====
+
+game_loop ;
+
+ ld a,0
+my_timer = $-1
+ dec a
+ jr nz,game_timer_
+ call hurtenergy
+ jr nz,game_timer
+ ld a,7*2
+ ld (spritemap_-8+1),a ; desintegracion!
+ ld hl,ultimatesfx
+ ld (int7_chan),hl
+game_timer ld a,60
+game_timer_ ld (my_timer),a
+
+ call frame_init
+
+; patch 20151023: campo estelar ciclico
+ ld hl,0
+game_star_posx = $-2
+ ld c,$C0 ; borrar estrellas viejas
+ ld a,l
+ call game_star_draw
+ ld hl,(game_star_posx)
+ ld a,(spritemap_-8+2) ; POSX
+ cpl
+ ld l,h
+ ld h,a
+ ld (game_star_posx),hl
+ ld c,$38 ; dibujar estrellas nuevas
+ call game_star_draw
+
+ ld a,1
+ ld (items_sprite_swap),a
+
+ ld hl,(spritemap_-8+3) ; HL=POSY
+ and a
+ ld bc,9*8
+ sbc hl,bc
+ ld a,(spritemap_-8+2) ; A=POSX
+ sub $70
+ call items_show1i
+ call items_show2i ; borde izquierdo, atras
+ ld a,(spritemap_-8+2) ; A=POSX
+ add $70
+ call items_show1d
+ call items_show2d ; borde derecho, atras
+
+ push hl
+ ld hl,(spritemap_-8+2) ; HL=POSY.LO:POSX
+ call tower_draw
+ pop hl
+
+ xor a
+ ld (items_sprite_swap),a
+
+ ld a,(spritemap_-8+2) ; A=POSX
+ sub $40
+ call items_show4i ; borde izquierdo, delante
+ ld a,(spritemap_-8+2) ; A=POSX
+ add $40
+ call items_show2d ; borde derecho, delante
+ call items_show1d ; no repetimos la columna frontal
+
+ ld de,$681D
+ ld bc,$1806
+ ld a,(spritemap_-8+1)
+ cp 16*2
+ jr c,game_drawhero
+ cp 17*2
+ jr c,game_drawhero1
+ cp 18*2
+ jr c,game_drawhero2
+ cp 19*2
+ jr nc,game_drawhero2
+ ld d,$64
+ ld b,$10
+ rrca
+ jr nc,game_drawhero4
+ ld hl,(sprites+18*4+2)
+; dec e
+ call sprite_draw
+ ex de,hl
+ inc l
+ inc l
+ ld xh,8
+ call sprite_drawd
+ jr game_drawhero_
+game_drawhero4 ld hl,(sprites+18*4)
+; inc e
+ call sprite_draw
+ ex de,hl
+ dec l
+ dec l
+ ld xh,8
+ call sprite_drawi
+ jr game_drawhero_
+game_drawhero1
+ ld d,$70
+ ld b,$10
+; jr game_drawhero
+game_drawhero2 ;
+game_drawhero add a
+ ld l,a
+ ld h,hi sprites
+ ld a,(hl)
+ inc l
+ ld h,(hl)
+ ld l,a
+ call sprite_draw
+game_drawhero_ ;
+
+ ld a,4 ; 12.5 FPS :(
+ call frame_exit
+
+ ld iy,spritemap_-8
+ ld a,(iy+1)
+ cp 8*2
+ jp c,game_hero_dying
+ cp 16*2
+ jp c,game_hero_spawn
+
+ ld hl,(spritemap_-8+3) ; POSY
+ ld a,(iy+2) ; POSX
+ rrca
+ rrca
+ rrca
+ rrca
+ and $0F
+ ld c,a ; 0..15
+; ld a,l
+; and $07
+; ld b,a ; 0..7
+ ld a,l
+ add a
+ rl h
+ and $F0
+ or c
+ ld xl,a
+ ld a,h
+ add hi tiletable
+ ld xh,a
+
+game_hero_move jp game_hero_move_
+
+ ld b,(iy+1) ; B=SPRITE
+ ld c,0 ; C=VELX
+ call keys_lt
+ jr nz,$+6
+ set 0,b
+ ld c,-4
+ call keys_rt
+ jr nz,$+6
+ res 0,b
+ ld c,+4
+ ld (iy+6),c
+
+; ---- azulejos especiales ----
+
+ ld a,(iy+2)
+ and $0F
+ jp nz,game_hero_step
+ ld a,(ix+48)
+ cp $3F ; VERDE?
+ jr nz,game_hero_step7
+ ld a,b
+ and 1
+ add 18*2 ; forzar patas poco estiradas
+ ld b,a
+ ld (iy+7),-7
+ ld hl,miniboingsfx
+ ld (int7_chan),hl
+ jr game_hero_step
+game_hero_step7 cp $33 ; ROSA?
+ jr nz,game_hero_step6
+ ld hl,volatilesfx
+ ld (int7_chan),hl
+ push bc
+ push ix
+ call increase_score
+ pop ix
+ pop bc
+ ld (ix+48),0
+ jr game_hero_step
+game_hero_step6 cp $30 ; AZUL?
+ jr nz,game_hero_step2
+ ld a,(iy+2)
+ xor $80
+ ld (iy+2),a
+ ld a,xl
+ xor 8
+ ld xl,a
+ ld hl,warphsfx
+ jr game_hero_warpok
+game_hero_step2 cp $03 ; ROJO?
+ jr nz,game_hero_step4
+
+ push ix
+ pop hl
+ ld de,48
+ add hl,de
+ ld de,8
+game_hero_warp ; encontrar azulejo rojo vertical mas cercano
+ push hl
+ add hl,de
+ add hl,de
+ ld a,(hl)
+ pop hl
+ xor $03
+ jr z,game_hero_warp0
+ push hl
+ sbc hl,de
+ sbc hl,de
+ ld a,(hl)
+ pop hl
+ xor $03
+ jr z,game_hero_warp1
+ ld a,e
+ add 8
+ ld e,a
+ adc d
+ sub e
+ ld d,a
+ jr game_hero_warp
+game_hero_warp0 ld hl,(spritemap_-8+3) ; POSY
+ add hl,de
+ jr game_hero_warp_
+game_hero_warp1 ld hl,(spritemap_-8+3) ; POSY
+ sbc hl,de
+game_hero_warp_ ld (spritemap_-8+3),hl
+ ld hl,warpvsfx
+game_hero_warpok ; HL=SOUND,STACK=HL
+ ld (int7_chan),hl
+
+ ld a,(iy+1)
+ rrca
+ sbc a
+ and -8
+ add 4
+ ld (iy+6),a
+; jr game_hero_step
+game_hero_step4
+; jr game_hero_step
+game_hero_step ;
+
+; patch 20151023: subir escaleras a saltitos
+ ld a,(iy+2) ; POSX
+ and $0F
+ jr nz,game_hero_leap_
+ add c
+ add a
+ jr z,game_hero_leap_
+ ld a,(iy+2)
+ jr c,game_hero_leap1
+ cpl
+ and $F0
+ ld d,(ix+32+1)
+ ld e,(ix+16+1)
+ jr nz,game_hero_leap ; WRAP?
+ ld d,(ix+32+1-16)
+ ld e,(ix+16+1-16)
+ jr game_hero_leap
+game_hero_leap1 and $F0
+ ld d,(ix+32-1)
+ ld e,(ix+16-1)
+ jr nz,game_hero_leap ; WRAP?
+ ld d,(ix+32-1+16)
+ ld e,(ix+16-1+16)
+; jr game_hero_leap
+game_hero_leap xor a
+ or e
+ jr nz,game_hero_leap_
+ or d
+ jr z,game_hero_leap_
+ ld (iy+7),-4 ; mini salto para subir pelda#os
+ ld a,b
+ and 1
+ add 2*19-2
+ ld b,a ; forzar patas estiradas
+game_hero_leap_ ;
+
+ call keys_fire
+ jr nz,game_hero_jump
+ ld hl,boingsfx
+ ld (int7_chan),hl
+ ld a,4
+ ld (game_hero_hold),a
+ ld (iy+7),-8
+ ld a,b
+ and 1
+ add 2*18
+ jr game_hero_jump_
+game_hero_jump ;
+
+ ld a,c
+ add a
+ ld a,b
+ jr z,game_hero_anim0
+ add 2
+ and 6
+ bit 7,c
+ jr z,$+3
+ inc a
+ jr $+4
+game_hero_anim0 and 1
+ add 2*16
+game_hero_jump_ ld (iy+1),a
+
+; ---- fisica del heroe ----
+
+game_hero_move_ ld a,(game_hero_move)
+ cp $C3
+ ld a,$C3
+ ld (game_hero_move),a
+ jr nz,game_hero_hold_
+
+ ld a,0
+game_hero_hold = $-1
+ and a
+ jr z,game_hero_hold1
+ dec a
+ ld (game_hero_hold),a
+ call keys_fire
+ jr z,game_hero_hold_
+ xor a
+ ld (game_hero_hold),a
+game_hero_hold1 ; !
+ inc (iy+7)
+ inc (iy+7)
+game_hero_hold_ ; ?
+
+ ld hl,(spritemap_-8+3)
+ ld a,(iy+7) ; VELY
+ ld c,a
+ add a ; HL=POSY,C=VELY
+ ld de,+16
+ jr nc,game_hero_fall
+ ld de,-16
+ rra
+ neg
+ ld c,a
+game_hero_rise ; subir
+ ld a,(iy+2)
+ and $0F
+ jr z,game_hero_risex
+ ld a,(iy+2)
+ cpl
+ and $F0
+ ld a,(ix+1)
+ jr nz,game_hero_risex ; WRAP?
+ ld a,(ix+1-16)
+game_hero_risex or (ix)
+ jr nz,game_hero_bonk
+ ld a,c
+ sub 8
+ jr c,game_hero_rise_
+ ld c,a
+ ld a,l
+ sub 8
+ ld l,a
+ sbc a
+ add h
+ ld h,a
+ add ix,de
+ jr game_hero_rise
+game_hero_bonk ld a,l
+; add 7
+ and $F8
+ ld l,a
+ xor a
+ ld (iy+7),a
+ ld (game_hero_hold),a
+ push hl
+ ld hl,headbuttsfx
+ ld (int7_chan),hl
+ pop hl
+ jp game_hero_posy
+game_hero_rise_ ld a,l
+ sub c
+ ld l,a
+ sbc a
+ add h
+ ld h,a
+ jp game_hero_posy
+
+game_hero_fall ; bajar
+ ld a,(iy+2)
+ and $0F
+ jr z,game_hero_fallx
+ ld a,(iy+2)
+ cpl
+ and $F0
+ ld a,(ix+48+1)
+ jr nz,game_hero_fallx ; WRAP?
+ ld a,(ix+48+1-16)
+game_hero_fallx or (ix+48)
+ jr nz,game_hero_land
+; patch 20151023: bug fix (imprecision)
+ ld a,c
+ and a
+ jr z,game_hero_fall_
+ ld a,8
+ cp c
+ jr c,$+3
+ ld a,c
+ ld b,a
+ ld a,c
+ sub b
+ ld c,a
+ ld a,b
+ ld b,l
+ add l
+ ld l,a
+ adc h
+ sub l
+ ld h,a
+ ld a,b
+ xor l
+ and $F8
+ jr z,$+4
+ add ix,de
+ jr game_hero_fall
+
+game_hero_land ld a,l
+ and $F8
+ ld l,a
+ xor a
+ ld (iy+7),a
+ ld a,$21 ; dummy $C3
+ ld (game_hero_move),a
+
+; jr game_hero_posy
+game_hero_fall_; jr game_hero_posy
+game_hero_posy ld (spritemap_-8+3),hl
+ ld a,(iy+7)
+ add a
+ jr z,game_hero_posy_
+ jr c,game_hero_posy_
+ set 1,(iy+1) ; anim2->anim3
+game_hero_posy_ ;
+
+ ld a,(iy+2)
+ bit 7,(iy+6)
+ jr z,$+3
+ dec a
+ rrca
+ rrca
+ rrca
+ rrca
+ and $0F
+ ld c,a
+ ld a,xl
+ and $F0
+ or c
+ ld xl,a
+
+ ld a,(iy+6) ; VELX
+ add a
+ jr z,game_hero_posx_
+ ld a,(ix+16)
+ ld b,(ix+32)
+ ld c,15
+ jr c,game_hero_sign
+ ld a,(iy+2)
+ cpl
+ and $F0
+ ld a,(ix+16+1)
+ ld b,(ix+32+1)
+ ld c,0
+ jr nz,game_hero_sign ; WRAP!
+ ld a,(ix+16+1-16)
+ ld b,(ix+32+1-16)
+game_hero_sign or b
+ ld a,(iy+2)
+ jr z,game_hero_addx
+ add (iy+6)
+ add c
+ and $F0
+ jr game_hero_posx
+game_hero_addx add (iy+6)
+game_hero_posx ld (iy+2),a
+game_hero_posx_ ;
+
+ jr game_hero_done
+
+game_hero_dying sub 2
+ ld (iy+1),a
+ jr nc,game_hero_done
+ jp game_dead
+game_hero_spawn add 2
+ ld (iy+1),a
+game_hero_done ;
+
+ ld a,(iy+2) ; hemos alcanzado a Ginebra?
+ add $10
+ cp $20-1
+ jr nc,game_goal_
+ and a
+ ld hl,(spritemap_-8+3) ; POSY
+ ld bc,(32-3)*8
+ sbc hl,bc
+ ld a,h
+ or l
+ jr nz,game_goal_
+
+ ld hl,goalsong
+ ld (int7_song),hl
+ call game_add_score
+
+game_goal_wait halt
+ ld hl,(chip_temp+CHIP_CPOSL)
+ ld a,h
+ or l
+ jr nz,game_goal_wait
+
+ ld a,(game_round)
+ inc a
+ ld (game_round),a
+ call wait_fire_
+ jp game_init
+
+game_goal_
+
+ ld iy,spritemap
+game_item_loop
+ ld hl,(spritemap_-8+3) ; POSY
+ ld e,(iy+3)
+ ld d,(iy+4)
+ sbc hl,de
+ add hl,hl
+ ld a,h
+ inc a
+ cp 2
+ jr nc,game_item_loop_
+ ld a,(iy+0)
+ and $0F
+ jr z,game_item_loop_
+ ld hl,game_item_loop_
+ push hl
+ add a
+ add lo (game_item_types-2)
+ ld l,a
+ adc hi (game_item_types-2)
+ sub l
+ ld h,a
+ ld a,(hl)
+ inc hl
+ ld h,(hl)
+ ld l,a
+ jp (hl)
+game_item_loop_ ld a,yl
+ add 8
+ ld yl,a
+ add 8
+ jr nz,game_item_loop
+
+ call testhold ; "P"
+ jr nz,game_hold
+ call testwait
+ jr z,$-3
+ call testwait
+ jr nz,$-3
+ call testwait
+ jr z,$-3
+game_hold ld a,66 ; ESCAPE
+ call testakey
+ jp nz,game_loop ; $C2
+
+ call readkeys
+ ld a,66
+ call testakey
+ jr z,$-8
+
+; ==== TERMINA EL JUEGO ====
+
+game_over ;
+
+ ld hl,zerosong
+ ld (int7_song),hl
+
+ ld hl,$C31A
+ ld bc,$2006
+ ld a,$C0
+ call box
+ ld hl,overtext
+ call printfull
+
+ call wait_fire
+
+ jp menu_init
+
+game_dead ;
+ ld a,(game_lives)
+ dec a
+ ld (game_lives),a
+ jp nz,game_init
+ jr game_over
+
+; ==== LLAMADAS AUXILIARES ====
+
+game_star_plot macro
+ ld l,a
+ and $3F
+ cp $00+4
+ jr c,$+7
+ cp $00+60
+ jr nc,$+3
+ ld (hl),c
+ ld a,l
+ endm
+
+game_star_draw ; A=OFFSET,C=COLOR; !
+ ld l,a
+ ld a,(vram)
+ or $10
+ ld h,a
+ ld a,l
+ ld b,5
+game_star_draw1 inc h
+ add $16 ; valor de azar cutre
+ game_star_plot
+ add $1C ; ambos deben sumar 50
+ game_star_plot
+ djnz game_star_draw1
+ ret
+
+game_item_types ; dw game_item_type0 ; =RET
+ dw game_item_type1,game_item_type2,game_item_type3,game_item_type4,game_item_type5
+ dw game_item_type6,game_item_type7,game_item_type8,game_item_type9,game_item_typeA
+ dw game_item_typeB,game_item_typeC,game_item_typeD,game_item_typeE,game_item_typeF
+
+game_item_type5 ; Ginebra
+ dec (iy+7)
+ ret nz
+ set 6,(iy+7)
+ ld a,(iy+1) ; Ginebra mira a los lados
+ xor 1
+ ld (iy+1),a
+ ret
+game_item_type6 ; condensador de fluzo
+ ld a,(iy+1)
+ add 2
+ cp 23*2
+ jr c,$+4
+ ld a,20*2
+ ld (iy+1),a
+ call game_item_typehero
+ ret c
+ ld hl,powerupsfx
+ ld (int7_chan),hl
+ call game_add_score
+ jp fullenergy
+
+game_add_score call vsync1
+ call increase_score
+ call hurtenergy
+ jr nz,game_add_score
+ jr game_item_erase
+
+game_item_type7 ; proyectil
+ call game_item_typehurt
+ ld a,(iy+1)
+ cp 60*2
+ call nc,game_item_typenext
+ ld a,(iy+2) ; POSX
+ add (iy+6) ; VELX
+ ld (iy+2),a
+ dec (iy+7) ; TIMER
+ ret nz
+game_item_erase xor a
+ ld (iy+0),a ; TYPE
+ ld (iy+5),a ; LENY
+ ret
+
+game_item_type8 ; mano de piedra
+game_item_typeD ; slime
+ call game_item_typehurt
+ ld a,(iy+1)
+ and 6
+ jr nz,game_item_type81
+game_item_type83 ;
+ ld a,(iy+1)
+ cp 48*2 ; mano/slime?
+ jr nc,game_item_type8_
+ inc (iy+7)
+ bit 3,(iy+7)
+ ret z
+game_item_type8_ xor a
+ ld (iy+7),a
+game_item_typenext ld a,(iy+1)
+ and $F8
+ ld c,a
+ ld a,(iy+1)
+ add 2
+ and 7
+ add c
+ ld (iy+1),a
+ ret
+
+game_item_type81 sub 2
+ jr nz,game_item_type82
+ call game_item_typetile
+ ld a,(ix+48)
+ and a
+ jr nz,game_item_typenext
+ ld a,(iy+3)
+ add 8
+ ld (iy+3),a
+ adc (iy+4)
+ sub (iy+3)
+ ld (iy+4),a
+ ret
+game_item_type82 sub 2
+ jr z,game_item_type83
+
+ call game_item_typetile
+ ld a,(iy+1)
+ cp 48*2 ; mano/slime?
+ ld b,8
+ ld a,(ix-16)
+ jr nc,$+7
+ ld b,4
+ ld a,(ix)
+ and a
+ jr nz,game_item_typenext
+ ld a,(iy+3)
+ sub b
+ ld (iy+3),a
+ sbc a
+ add (iy+4)
+ ld (iy+4),a
+ ret
+
+game_item_type9 ; bola
+game_item_typeA ; caracol
+ call game_item_typehurt
+ call game_item_typenext
+ ld a,(iy+2)
+ and $0F
+ jr nz,game_item_type9_
+ call game_item_typetile
+ call game_item_typewalk
+ jr c,game_item_typeflip
+game_item_type9_ ld a,(iy+1)
+ cp 36*2
+ ld a,4
+ jr c,$+4 ; bola/caracol?
+ ld a,2
+game_item_typeaddx bit 0,(iy+1)
+ jr z,$+4
+ neg
+ add (iy+2)
+ ld (iy+2),a
+ ret
+game_item_typeflip ld a,(iy+1)
+ xor 1
+ ld (iy+1),a
+ ret
+
+game_item_typewalk ld a,(iy+1)
+ cp 52*2
+ jr c,$+7 ; guerrero y brujo son mas altos
+ ld bc,16
+ add ix,bc
+ bit 0,(iy+1)
+ ld a,(iy+2)
+ jr z,game_item_typewalki
+ and $F0
+ ld a,(ix+48-1)
+ ld b,(ix+32-1)
+ ld c,(ix+16-1)
+ jr nz,$+11 ; WRAP?
+ ld a,(ix+48+16-1)
+ ld b,(ix+32+16-1)
+ ld c,(ix+16+16-1)
+ jr game_item_typewalkd
+game_item_typewalki cpl
+ and $F0
+ ld a,(ix+48+1)
+ ld b,(ix+32+1)
+ ld c,(ix+16+1)
+ jr nz,$+11 ; WRAP?
+ ld a,(ix+48+1-16)
+ ld b,(ix+32+1-16)
+ ld c,(ix+16+1-16)
+game_item_typewalkd cp 1
+ ret c
+ ld a,b
+ or c
+ cp 1
+ ccf
+ ret
+
+game_item_typeB ; calabaza
+ call game_item_typehurt
+ ld a,2
+ call game_item_typeaddx
+ ld a,(iy+6)
+ and a
+ jr nz,game_item_typeB_
+ inc (iy+6)
+ ld (iy+7),-7
+ ret
+game_item_typeB_ ld a,(iy+7)
+ add a
+ ld c,a
+ sbc a
+ ld b,a
+ ld l,(iy+3)
+ ld h,(iy+4)
+ add hl,bc
+ ld (iy+3),l
+ ld (iy+4),h
+ xor a
+ sub (iy+7)
+ cp -7
+ jr nz,game_item_typeB0
+ ld (iy+7),a
+ ld hl,calabazasfx
+ ld (int7_chan),hl
+ res 1,(iy+1) ; aplastada
+ jp game_item_typeflip
+game_item_typeB0 inc (iy+7)
+ set 1,(iy+1) ; estirada
+ ret
+
+game_item_typeC ; fantasma
+ ld a,(iy+1)
+ dec (iy+7) ; TIMER
+ jr nz,$+4
+ xor 1
+ add 2
+ and 6+1
+ add 2*44
+ ld (iy+1),a
+ rrca
+ ld a,+2
+ jr nc,$+4
+ neg
+ add (iy+2)
+ ld (iy+2),a
+ and 2
+ xor (iy+3)
+ ld (iy+3),a
+game_item_typehurt call game_item_typehero
+ ret c
+ ld a,1
+ ld (my_timer),a ; herida!
+ ld hl,damagesfx
+ ld (int7_chan),hl
+ ret
+
+game_item_typeE ; guardia
+game_item_typeF ; brujo
+ call game_item_typehurt
+ ld a,(iy+1)
+ add 2
+ and 6
+ cp 6
+ jr nz,$+3
+ xor a
+ ld b,a
+ ld a,(iy+1)
+ and $F8+1
+ add b
+ ld (iy+1),a
+ ld a,(iy+2)
+ and $0F
+ jr nz,game_item_typeE_
+ call game_item_typetile
+ call game_item_typewalk
+ jr c,game_item_typeE1
+game_item_typeE_ ld a,4
+ jp game_item_typeaddx
+game_item_typeE1 ; disparo!!
+ ld a,yl
+ add 8
+ ld xl,a
+ ld xh,hi spritemap
+ ld (ix+0),7
+ ld a,(iy+2)
+ ld (ix+2),a
+ ld a,(iy+1)
+ cp 2*56
+ ld a,2*55 ; espada
+ ld b,4
+ ld c,8
+ ld d,8
+ ld e,16
+ jr c,game_item_typeE1_
+ ld a,2*60 ; hechizo
+ ld b,20
+ ld c,8
+ ld d,3*8
+ ld e,8
+game_item_typeE1_ ; A=SPRITE,B=VIDA,C=VELOCIDAD,D=ALTURA,E=DISTANCIA
+ bit 0,(iy+1)
+ jr z,$+3
+ inc a
+ ld (ix+1),a
+ bit 0,a
+ ld a,c
+ jr z,$+4
+ neg
+ ld (ix+6),a
+ ld (ix+5),d
+ ld a,(iy+3)
+ ld d,(iy+4)
+ add e
+ ld e,a
+ adc d
+ sub e
+ ld (ix+3),e
+ ld (ix+4),a
+ ld (ix+7),b
+ jp game_item_typeflip
+
+game_item_type1
+game_item_type2
+game_item_type3
+game_item_type4
+game_item_type0 ret
+
+game_item_typehero ; hay contacto con Lanzarote? ; CF=FALSO
+ ld a,(spritemap_-8+1)
+ cp 16*2
+ ret c
+ ld a,(spritemap_-8+2)
+ sub (iy+2)
+ add 12
+ cp 24+1
+ ccf
+ ret c
+ ld hl,(spritemap_-8+3)
+ ld e,(iy+3)
+ ld d,(iy+4)
+ sbc hl,de
+ ld a,l
+ add 20;24
+ ld l,a
+ adc h
+ sub l
+ scf
+ ret nz
+ ld a,l
+ cp 40+1;48
+ ccf
+ ret
+
+game_item_typetile
+ ld h,(iy+4)
+ ld l,(iy+3)
+ ld a,(iy+2)
+ rrca
+ rrca
+ rrca
+ rrca
+ and $0F
+ ld c,a ; 0..15
+; ld a,l
+; and $07
+; ld b,a ; 0..7
+ ld a,l
+ add a
+ rl h
+ and $F0
+ or c
+ ld xl,a
+ ld a,h
+ add hi tiletable
+ ld xh,a
+ ret
+
+; ---- dibujar azulejos y sprites en orden tridimensional ----
+
+brick_next macro lbl
+ add 8
+ bit 6,a
+lbl jr nz,$+9
+ ld a,l
+ add $40
+ ld l,a
+ ld a,h
+ adc 8-$40
+ ld h,a
+ endm
+
+brick_drawi macro
+ dw ldhlbi,ldhlbi,ldhlci,ldhldi,ldhlci,ldhlci,ldhlbi
+ ld (hl),e
+ endm
+brick_drawd macro
+ dw ldhled,ldhlbd,ldhlcd,ldhlcd,ldhldd,ldhlcd,ldhlbd
+ ld (hl),b
+ endm
+brick_drawiz macro
+ dw ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei
+ ld (hl),e
+ endm
+brick_drawdz macro
+ dw ldhled,ldhled,ldhled,ldhled,ldhled,ldhled,ldhled
+ ld (hl),e
+ endm
+
+items_show4d call $+3
+items_show2d call $+3
+items_show1d sub $10
+ jr items_show1
+items_show4i call $+3
+items_show2i call $+3
+items_show1i add $10
+items_show1 ; A=POSX,HL=POSY; dibuja una columna de azulejos y sprites
+ and $F0
+ push hl
+ push af
+
+ rrca
+ rrca
+ rrca
+ rrca
+ and $0F
+ ld c,a ; 0..15
+ ld a,l
+ and $07
+ ld b,a ; 0..7
+ ld a,l
+ and $F8
+ add a
+ rl h
+ or c
+ ld l,a
+ ld a,h
+ or hi tiletable
+ ld h,a
+ ex de,hl
+
+ pop af
+ push af
+ ld l,a
+ ld a,(spritemap_-8+2) ; POSX
+ sub l
+ ld l,a
+ ld h,hi posx3d
+ ld l,(hl)
+ dec l
+ dec l
+ dec l
+ dec l
+ ld a,(vram)
+ inc a
+ ld h,a
+ ld yh,hi edgesdirt
+ add a
+ and $80
+ add $10
+ ld yl,a
+
+; HL=^VRAM,DE=^TILE,IY=^DIRT,B=PIXEL(0..7)
+
+ ld xl,20
+ ld a,b
+ and a
+ push af
+ jr z,items_tiles
+ dec xl
+ call items_brick_head
+
+items_tiles ld a,(de)
+ and a
+ jp z,items_tile
+ push de
+
+ call items_tiledirt
+
+ ld a,(de)
+ cp $03
+ jr z,items_tileflash
+ cp $30
+ jr nz,items_tileflash_
+items_tileflash bit 6,h
+ jr z,items_tileflash_
+ or $0C
+items_tileflash_
+
+ ld e,a
+ set 6,a ; "+01"
+ ld b,a
+ and $55
+ or $88 ; "30"
+ ld c,a
+ ld d,$CC
+ ld a,h
+
+ brick_drawiz
+ brick_next items_brick1jrnz
+ brick_drawd
+ brick_next items_brick2jrnz
+ brick_drawi
+ brick_next items_brick3jrnz
+ brick_drawd
+ brick_next items_brick4jrnz
+ brick_drawi
+ brick_next items_brick5jrnz
+ brick_drawd
+ brick_next items_brick6jrnz
+ brick_drawi
+ brick_next items_brick7jrnz
+ brick_drawdz
+ brick_next items_brick8jrnz
+
+ pop de
+ jr items_tile_
+items_tile ; vacio
+ ld a,l
+ add $40
+ ld l,a
+ adc h
+ sub l
+ ld h,a
+items_tile_ ld a,e
+ add $10
+ ld e,a
+ adc d
+ sub e
+ ld d,a
+ inc yl
+ inc yl
+ inc yl
+ inc yl
+
+ dec xl
+ jp nz,items_tiles
+
+ pop af
+ call nz,items_brick_foot
+
+ pop af
+ pop de
+ push de
+ push af
+
+ ld c,a
+ ld iy,spritemap
+items_sprite
+ ld a,(iy+2)
+ ld b,(iy+5)
+ and $F0
+ xor c
+ jr nz,items_sprite_
+ or b
+ jr z,items_sprite_
+ add (iy+3)
+ ld l,a
+ adc (iy+4)
+ sub l
+ ld h,a
+ and a
+ sbc hl,de
+ ld a,h
+ and a
+ jr nz,items_sprite_
+ or l
+ jr z,items_sprite_
+ sub b
+ jr c,items_sprite0
+ cp $A0
+ jr nc,items_sprite_
+items_sprite0
+
+ push de
+ push bc
+
+ add $20
+ ld d,a
+
+ ld c,$06
+ ld a,(iy+1)
+ cp 20*2 ; caso especial: condensador es LENX=2
+ jr c,items_sprite4x
+ cp 23*2
+ jr nc,items_sprite4x
+ ld c,$04
+items_sprite4x
+
+ ld a,d
+ add b
+ sub $C0
+ jr c,items_sprite_foot
+ neg a
+ add b
+ ld b,a
+items_sprite_foot ;
+ ld h,0
+ ld l,h
+items_sprite_head ld a,d
+ cp $20
+ jr nc,items_sprite_head_
+ ld a,l
+ add c
+ ld l,a
+ adc h
+ sub l
+ ld h,a
+ inc d
+ dec b
+ jr nz,items_sprite_head
+ jr items_sprite_fail
+items_sprite_head_ ;
+
+ push hl
+ ld l,(iy+2)
+ ld a,(spritemap_-8+2) ; POSX
+ sub l
+ ld l,a
+ ld h,hi posx3d
+ ld e,(hl)
+ dec e
+ dec e
+ ld a,c
+ cp 6
+ jr c,$+3
+ dec e
+
+ ld a,(iy+1)
+ xor 1
+items_sprite_swap = $-1
+ add a
+ ld l,a
+ ld h,hi sprites
+ ld a,(hl)
+ inc l
+ ld h,(hl)
+ ld l,a
+
+ ex de,hl
+ ex hl,(sp)
+ add hl,de
+ pop de
+
+ call sprite_dirt
+ call sprite_draw
+items_sprite_fail ;
+
+ pop bc
+ pop de
+
+items_sprite_
+ ld a,yl
+ add 8
+ ld yl,a
+ add 8
+ jp nz,items_sprite
+
+ pop af
+ pop hl
+ ret
+
+sprite_dirt ; DE=POSY:POSX,BC=LENY:LENX; AF!
+ ld a,e
+ cp 16 ; TORRE IZQ.
+ jr c,sprite_dirt0
+ add c
+ cp 16+32+1 ; TORRE DCH.
+ ret c
+
+sprite_dirt0 ;
+ push hl
+ push bc
+
+ ld a,d
+ rrca
+ and $7E
+ ld l,a
+
+ ld a,d
+ add b
+ dec a
+ rrca
+ and $7E
+ sub l
+ rra
+ inc a
+ ld b,a
+
+ ld a,(vram)
+ add a
+ add l
+ ld l,a
+ ld h,hi edgesdirt
+
+ bit 5,e
+ jr nz,sprite_dirt1
+ ld a,16
+ sub e
+ jr sprite_dirt9
+sprite_dirt1 inc l
+ ld a,e
+ add c
+ sub 16+32;+1
+; jr sprite_dirt9
+sprite_dirt9 cp (hl)
+ jr c,$+3
+ ld (hl),a
+ inc l
+ inc l
+ djnz sprite_dirt9
+ pop bc
+ pop hl
+ ret
+
+items_brick_foot ld b,a
+ ld a,(de)
+ and a
+ ret z
+
+ call items_tiledirt
+
+ ld a,(de)
+ ld e,a
+ set 6,a
+ ld c,a
+ and $55
+ or $88
+ ld d,a
+
+ call items_brick_dark
+ dec b
+ ret z
+ jr items_brick_body
+
+items_brick_head ld b,a ; A=1..7
+ ld a,(de)
+ and a
+ jr nz,items_brick_head0
+
+ ld a,8
+ sub b
+ add a
+ add a
+ add a
+ add h
+ ld h,a
+ bit 6,a
+items_brick_head_jrnz jr nz,$+10
+ ld a,l
+ add $40
+ ld l,a
+ ld a,h
+ adc -$40
+ ld h,a
+ jr items_brick_skip
+
+items_brick_head0 ;
+ call items_tiledirt
+
+ push de
+
+ ld a,(de)
+ ld e,a
+ set 6,a
+ ld c,a
+ and $55
+ or $88
+ ld d,a
+
+ ld a,7
+ sub b
+ ld b,a
+ call nz,items_brick_body
+ call items_brick_dark
+
+ pop de
+
+items_brick_skip ;
+ ld a,e
+ add $10
+ ld e,a
+ adc d
+ sub e
+ ld d,a
+
+ bit 5,h
+ jr z,$+6
+ inc yl
+ inc yl
+
+ ret
+
+items_brick_dark ld a,l
+ ld (hl),e
+ inc l
+ ld (hl),e
+ inc l
+ ld (hl),e
+ inc l
+ ld (hl),e
+ inc l
+ ld (hl),e
+ inc l
+ ld (hl),e
+ inc l
+ ld (hl),e
+ inc l
+ ld (hl),e
+ ld l,a
+items_brick_next ld a,h
+ brick_next items_brick_jrnz
+ ret
+
+items_brick_body ld a,l
+ ld (hl),c
+ inc l
+ ld (hl),c
+ inc l
+ ld (hl),d
+ inc l
+ ld (hl),$CC
+ inc l
+ ld (hl),d
+ inc l
+ ld (hl),d
+ inc l
+ ld (hl),c
+ inc l
+ ld (hl),e
+ ld l,a
+ call items_brick_next
+ djnz items_brick_body
+ ret
+
+items_tiledirt ld a,l
+ and $3F
+ cp 16
+ jr c,items_tiledirti
+ cp 48-7
+ ret c;jr c,items_tiledirt_
+;items_tiledirtd ; "ensuciar" por la derecha
+ sub 48-8
+ cp (iy+1)
+ jr c,$+5
+ ld (iy+1),a
+ cp (iy+3)
+ jr c,$+5
+ ld (iy+3),a
+ ld c,a
+ ld a,h
+ and $38
+ ret z;jr z,items_tiledirt_
+ ld a,c
+ cp (iy+5)
+ ret c;jr c,$+5
+ ld (iy+5),a
+ ret;jr items_tiledirt_
+items_tiledirti ; "ensuciar" por la izquierda
+ neg
+ add 16
+ cp (iy+0)
+ jr c,$+5
+ ld (iy+0),a
+ cp (iy+2)
+ jr c,$+5
+ ld (iy+2),a
+ ld c,a
+ ld a,h
+ and $38
+ ret z;jr z,items_tiledirt_
+ ld a,c
+ cp (iy+4)
+ ret c;jr c,$+5
+ ld (iy+4),a
+ ret;items_tiledirt_
+
+; ----
+
+fullenergy ; barra de energia al maximo
+ xor a
+ ld (my_timer),a
+ ld a,60
+ ld (my_energy),a
+ ld hl,$C080+2
+ ld bc,$081E
+ ld a,$CF
+ jp box
+
+hurtenergy ld a,0
+my_energy = $-1
+ dec a
+ ld (my_energy),a
+ ld hl,$C880+2
+ add l
+ ld l,a
+ ld a,$C3
+ ld (hl),a
+ res 6,h
+ ld (hl),a
+ set 4,h
+ ld (hl),a
+ set 6,h
+ ld (hl),a
+ res 3,h
+ ld (hl),a
+ res 6,h
+ ld (hl),a
+ set 5,h
+ ld (hl),a
+ set 6,h
+ ld (hl),a
+ res 4,h
+ ld (hl),a
+ res 6,h
+ ld (hl),a
+ set 3,h
+ ld (hl),a
+ set 6,h
+ ld (hl),a
+ set 4,h
+ ld a,l
+ sub $80+2
+ ret
+
+increase_score ld hl,(game_score)
+ ld a,1
+ add l
+ daa
+ ld l,a
+ ld a,h
+ adc 0
+ daa
+ ld h,a
+ ld (game_score),hl
+update_score ld hl,(game_score)
+ ld de,textscore
+ jr print_score
+update_hiscore ld hl,(game_hiscore)
+ ld de,texthiscore
+; jr print_score
+print_score ; HL=SCORE,DE=^STRING; !
+ push de
+ inc de
+ inc de
+ inc de
+ ld a,h
+ call bcdbyte_char
+ ld a,l
+ call bcdbyte_char
+ pop hl
+ jp printfull
+bcdbyte_char ld b,a
+ rrca
+ rrca
+ rrca
+ rrca
+ call nibble_char
+ ld a,b
+nibble_char and $0F
+ add "0"
+ ld (de),a
+ inc de
+ ret
+decimal_char ld b,0
+ cp 10
+ jr c,$+7
+ sub 10
+ inc b
+ jr $-7
+ ld c,a
+ ld a,b
+ call nibble_char
+ ld a,c
+ jr nibble_char
+
+menu_demologo ld a,d
+ add c
+ ld d,a
+ inc c
+ cp 44+40
+ jr c,$+4
+ dec c
+ dec c
+ push bc
+ push de
+ ld bc,$1806
+ call sprite_draw
+ ld hl,$0040+4
+ add hl,de
+ inc d ; NZ!
+ ld xh,24
+ call sprite_drawi
+ pop de
+ ld a,e
+ add 6
+ ld e,a
+ ld h,b
+ ld l,c
+ pop bc
+ ret
+
+game_buildatile and $0F
+ cp 8
+ jr nc,game_buildatile1
+ add a
+ add lo colourmap
+ ld l,a
+ ld h,hi colourmap
+ ld a,(hl)
+ ld (de),a
+ ret
+game_buildatile1 and 7
+ jr nz,game_buildatile2
+ cp (ix+8)
+ jr z,game_buildatile2
+; caso especial: condensador de fluzo
+ ld (iy+0),6
+ ld (iy+1),2*20
+ ld a,3*8
+ dec b
+ dec b
+ call game_buildatile_poslen
+ inc b
+ inc b
+ ret
+
+game_buildatile2 ; enemigos
+
+ add 8
+ ld (iy+0),a ; 8..15
+ dec a
+ add a
+ add a
+ add a
+ ld (iy+1),a ; 2*28,2*32,2*36...
+ cp 2*52
+ ld a,3*8
+ jr c,game_buildatile_poslen
+ ld a,4*8 ; caso especial: guerrero y brujo son mas altos, y disparan
+game_buildatile_poslen ; A=LENY,BC=POSY:POSX; IX+++,AHL!
+ ld (iy+5),a
+ ld a,c
+ add a
+ add a
+ add a
+ add a
+ ld (iy+2),a
+ xor a
+ ld (de),a
+ ld l,b
+ ld h,a
+ add hl,hl
+ add hl,hl
+ add hl,hl
+ inc h ; relleno de seguridad (superior)
+ ld (iy+3),l
+ ld (iy+4),h
+ ld (iy+6),a
+ ld (iy+7),a
+ call game_buildatile_poslen_
+ ld a,(iy+0-8)
+ cp $0E
+ ret c ; caso especial: guerrero y brujo crean un disparo
+game_buildatile_poslen_ ld a,yl
+ add 8
+ ld yl,a
+ ret
+
+; ---- limpiar restos de sprites ----
+
+frame_init ; -; !
+
+edges_wiped macro vv
+ ld (hl),c
+ dec l
+ ld (hl),c
+ if vv > 1
+ dec l
+ ld (hl),c
+ dec l
+ ld (hl),c
+ if vv > 2
+ dec l
+ ld (hl),c
+ dec l
+ ld (hl),c
+ if vv > 3
+ dec l
+ ld (hl),c
+ dec l
+ ld (hl),c
+ endif
+ endif
+ endif
+ endm
+
+edges_wipei macro vv
+ ld (hl),c
+ inc l
+ ld (hl),c
+ if vv > 1
+ inc l
+ ld (hl),c
+ inc l
+ ld (hl),c
+ if vv > 2
+ inc l
+ ld (hl),c
+ inc l
+ ld (hl),c
+ if vv > 3
+ inc l
+ ld (hl),c
+ inc l
+ ld (hl),c
+ endif
+ endif
+ endif
+ endm
+
+ ld a,(vram)
+ ld h,a
+ inc h
+ ld l,$10
+ ld d,hi edgesdirt
+ add a ; $80/C0 -> $00/$80
+ add $10 ; saltar panel superior
+ ld e,a
+ ld bc,40*256+$C0
+
+edges_wipe1 ld a,(de)
+ and a
+ jp z,edges_wiped5
+
+ res 5,l
+ dec l
+ cp 5
+ jr nc,edges_wiped0
+ cp 3
+ jr nc,edges_wiped2
+edges_wiped1 ;
+ edges_wiped 1
+ set 3,h
+ edges_wipei 1
+ set 4,h
+ edges_wiped 1
+ res 3,h
+ edges_wipei 1
+ jp edges_wiped_
+edges_wiped2 ;
+ edges_wiped 2
+ set 3,h
+ edges_wipei 2
+ set 4,h
+ edges_wiped 2
+ res 3,h
+ edges_wipei 2
+ jr edges_wiped_
+edges_wiped0 cp 7
+ jr nc,edges_wiped4
+edges_wiped3 ;
+ edges_wiped 3
+ set 3,h
+ edges_wipei 3
+ set 4,h
+ edges_wiped 3
+ res 3,h
+ edges_wipei 3
+ jr edges_wiped_
+edges_wiped4 ;
+ edges_wiped 4
+ set 3,h
+ edges_wipei 4
+ set 4,h
+ edges_wiped 4
+ res 3,h
+ edges_wipei 4
+; jr edges_wiped_
+edges_wiped_ res 4,h
+ inc l
+ xor a
+ ld (de),a
+edges_wiped5 inc e
+
+ ld a,(de)
+ and a
+ jp z,edges_wipei5
+
+ set 5,l
+ cp 5
+ jr nc,edges_wipei0
+ cp 3
+ jr nc,edges_wipei2
+edges_wipei1 ;
+ edges_wipei 1
+ set 3,h
+ edges_wiped 1
+ set 4,h
+ edges_wipei 1
+ res 3,h
+ edges_wiped 1
+ jp edges_wipei_
+edges_wipei2 ;
+ edges_wipei 2
+ set 3,h
+ edges_wiped 2
+ set 4,h
+ edges_wipei 2
+ res 3,h
+ edges_wiped 2
+ jr edges_wipei_
+edges_wipei0 cp 7
+ jr nc,edges_wipei4
+edges_wipei3 ;
+ edges_wipei 3
+ set 3,h
+ edges_wiped 3
+ set 4,h
+ edges_wipei 3
+ res 3,h
+ edges_wiped 3
+ jr edges_wipei_
+edges_wipei4 ;
+ edges_wipei 4
+ set 3,h
+ edges_wiped 4
+ set 4,h
+ edges_wipei 4
+ res 3,h
+ edges_wiped 4
+; jr edges_wipei_
+edges_wipei_ res 4,h
+ xor a
+ ld (de),a
+edges_wipei5 inc e
+
+ ld a,h
+ add $20
+ bit 5,a
+ jr nz,edges_wipe_
+ ld a,l
+ add $40
+ ld l,a
+ ld a,h
+ adc $20-$40
+edges_wipe_ ld h,a
+ dec b
+ jp nz,edges_wipe1
+ ret
+
+; ---- esperar y mostrar el nuevo frame ----
+
+frame_exit ; A=FRAMES; !
+ call vsync
+
+ ld a,$C0
+vram = $-1
+ xor $40
+ ld (vram),a
+
+ rrca
+ rrca
+ xor $10
+ ld bc,$BC0C
+ out (c),c
+ inc b
+ out (c),a
+ rrca
+ xor $30
+ ld (items_brick1jrnz),a
+ ld (items_brick2jrnz),a
+ ld (items_brick3jrnz),a
+ ld (items_brick4jrnz),a
+ ld (items_brick5jrnz),a
+ ld (items_brick6jrnz),a
+ ld (items_brick7jrnz),a
+ ld (items_brick8jrnz),a
+ ld (items_brick_jrnz),a
+ ld (items_brick_head_jrnz),a
+ ld (sprite_drawijrnz),a
+ ld (sprite_drawdjrnz),a
+ xor $E0
+ ld (tower_gf00retnz),a
+ ld (tower_gf01retnz),a
+ ld (tower_gf10retnz),a
+ ld (tower_gf11retnz),a
+ ld (tower_gfA0retnz),a
+ ld (tower_gfA1retnz),a
+ ld (tower_gfA2retnz),a
+ ld (tower_gfA3retnz),a
+ ld (tower_gfA4retnz),a
+ ld (tower_gfA5retnz),a
+ ld (tower_gfA6retnz),a
+ ld (tower_gfA7retnz),a
+ ld (tower_gfB0retnz),a
+ ld (tower_gfB1retnz),a
+ ld (tower_gfB2retnz),a
+ ld (tower_gfB3retnz),a
+ ld (tower_gfB4retnz),a
+ ld (tower_gfB5retnz),a
+ ld (tower_gfB6retnz),a
+ ld (tower_gfB7retnz),a
+ xor $08
+
+; ---- leer estado del teclado ----
+
+readkeys ; -; FBCHL!
+ ld hl,keymap+9
+ ld bc,$F40E
+ di
+ out (c),c
+ ld bc,$F6C0 ; SELECT REG.
+ out (c),c
+ dw $71ED ; =OUT(C),0 ; CPC PLUS COMPAT.
+ ld bc,$F792
+ out (c),c
+ ld c,$49 ; KEYB.LINE(9-0)+READ REG.
+readkeys_ ld b,$F6
+ out (c),c
+ ld b,$F4
+ ind ; =IN TEMP,(C); LD (HL),TEMP; DEC B; DEC HL
+ dec c
+ bit 6,c
+ jr nz,readkeys_
+ ld bc,$F782
+ out (c),c
+ ei
+ ret
+
+vsync1 ld a,1
+vsync dec a ; A=FRAMES; A!
+ cp -1
+ jr nc,$-2
+ xor a ; triste, pero util
+ ld (vsync+2),a
+; ret z ; *!* DEBUG *!*
+ ret
+
+; ==== HARDWARE BASICO ====
+
+int7 ex af,af'
+ ld a,$F5
+ in a,(0)
+ rrca
+ jr nc,int7_
+ exx
+ ld hl,vsync+2
+ inc (hl)
+ push ix
+ ld hl,0
+int7_song = $-2
+ ld a,h
+ or l
+ call nz,chip_song
+ ld de,0
+int7_chan = $-2
+ ld a,d
+ or e
+ ld a,1
+ call nz,chip_chan
+ call chip_play
+ ld h,b
+ ld l,b
+ ld (int7_song),hl
+ ld (int7_chan),hl
+ pop ix
+ exx
+int7_ ex af,af'
+ ei
+ ret
+
+keys_lt ; -; AF!,ZF?
+ ld a,8 ; CURS.IZQDA.
+ call testakey
+ ret z
+ ld a,46 ; N
+ call testakey
+ ret z
+ ld a,74 ; JOY1.IZQDA.
+ call testakey
+ ret z
+ ld a,71 ; Z
+ call testakey
+ ret z
+ ld a,50 ; R/JOY2.IZQDA.
+ jr testakey
+keys_rt ; -; AF!,ZF?
+ ld a,1 ; CURS.DRCHA.
+ call testakey
+ ret z
+ ld a,38 ; M
+ call testakey
+ ret z
+ ld a,75 ; JOY1.DRCHA.
+ call testakey
+ ret z
+ ld a,63 ; X
+ call testakey
+ ret z
+ ld a,51 ; T/JOY2.DRCHA.
+ jr testakey
+keys_fire ; -; AF!,ZF?
+ ld a,47 ; ESPACIO
+ call testakey
+ ret z
+ ld a,76 ; JOY1.FUEGO1
+ call testakey
+ ret z
+ ld a,77 ; JOY1.FUEGO2
+ call testakey
+ ret z
+ ld a,52 ; G/JOY2.FUEGO1
+ call testakey
+ ret z
+ ld a,53 ; F/JOY2.FUEGO2
+ jr testakey
+
+wait_fire call readkeys
+ call keys_fire
+ jr nz,$-6
+wait_fire_ call readkeys
+ call keys_fire
+ jr z,$-6
+ ret
+
+testwait call vsync1 ; patch 20151023: bug fix
+ call readkeys
+testhold ld a,27 ; "P"
+; inspirado en un truco de Richard Wilson
+testakey ; A=KEY ; AHL!,ZF=PRESSED?
+ rrca
+ rrca
+ rrca
+ ld h,a
+ and $0F
+; add lo keymap
+ ld l,a
+ ld a,h
+ ld h,hi keymap ; adc...
+ rrca
+ rrca
+ and $38
+ add $46
+ ld ($+4),a;BIT N,R
+ bit 0,(hl)
+ ret
+
+; ==== CRTC Y GRAFICOS ====
+
+crtcpair ; BC=$BC00+REG.,HL=VARH:VARY; C++
+ out (c),c
+ inc b
+ out (c),h
+ dec b
+ inc c
+ out (c),c
+ inc b
+ out (c),l
+ dec b
+ ret
+
+; ---- cajas y paneles ----
+
+cls ld a,$C0
+ ld hl,$C104
+ ld bc,$A01C
+box ; HL=^VRAM,BC=LENY:LENX,A=INK; HL=^VRAM,B=0
+ push bc
+ ld b,c
+ res 6,h ; VRAM.LO
+boxi ld (hl),a
+ inc l
+ ld (hl),a
+ inc l
+ dec c
+ jr nz,boxi
+ set 6,h ; VRAM.HI
+boxd dec l
+ ld (hl),a
+ dec l
+ ld (hl),a
+ djnz boxd
+ ld b,hi $0800
+ add hl,bc
+ jr nc,$+6
+ ld bc,$C040
+ add hl,bc
+ pop bc
+ djnz box
+ ret
+
+panel ; HL=^VRAM; ABCDEHLF!
+ ld a,$C0 ; "11"
+ ld bc,$2020
+ call box
+ dec h; Y=0
+ ld a,$0C ; "22"
+ ld (hl),a
+ res 6,h
+ ld (hl),a
+ ld l,$3F
+ ld (hl),a
+ set 6,h
+ ld (hl),a
+ ld bc,$3800+$C0
+ add hl,bc ; Y=7
+ ld (hl),a
+ res 6,h
+ ld (hl),a
+ ld l,c;$C0
+ ld (hl),a
+ set 6,h
+ ld (hl),a
+ ld de,$4884 ; "21":"12"
+ res 3,h ; Y=6
+ ld (hl),d
+ res 6,h
+ ld (hl),d
+ ld l,$FF
+ ld (hl),e
+ set 6,h
+ ld (hl),e
+ set 3,h
+ res 4,h ; Y=5
+ ld (hl),e
+ res 6,h
+ ld (hl),e
+ ld l,$C0
+ ld (hl),d
+ set 6,h
+ ld (hl),d
+ ld bc,0-$2000-$C0
+ add hl,bc ; Y=1
+ ld (hl),d
+ res 6,h
+ ld (hl),d
+ ld l,$3F
+ ld (hl),e
+ set 6,h
+ ld (hl),e
+ res 3,h
+ set 4,h ; Y=2
+ ld (hl),e
+ res 6,h
+ ld (hl),e
+ ld l,0
+ ld (hl),d
+ set 6,h
+ ld (hl),d
+ ret
+
+; ---- textos: printhalf para escribir solamente en la VRAM pendiente, printfull para ambas ----
+
+printspc1 ex de,hl
+printspc11 ld (hl),b
+ inc l
+ ld (hl),b
+ set 3,h
+ ld (hl),b
+ dec l
+ ld (hl),b
+ ld a,h
+ add 8
+ ld h,a
+ and $38
+ jr nz,printspc11
+ jr printspc1_
+printspc2 ex de,hl
+ ld a,h
+printspc21 res 6,h
+ ld (hl),b
+ inc l
+ ld (hl),b
+ set 6,h
+ ld (hl),b
+ dec l
+ ld (hl),b
+ add 8
+ ld h,a
+ jr nc,printspc21
+printspc1_ ex de,hl
+ jr printspc2_
+
+printchr1 push hl
+ add a
+ add a
+ add a
+ ld l,a
+ adc hi (graphics>>1)
+ sub l
+ ld h,a
+ add hl,hl
+printchr11 ld a,(hl)
+ and c
+ ld (de),a
+ inc l
+ inc e
+ ld a,(hl)
+ and c
+ ld (de),a
+ inc l
+ dec e
+ ld a,d
+ add 8
+ ld d,a
+ and $38
+ jr nz,printchr11
+ jr printchr1_
+printchr2 push hl
+ add a
+ add a
+ add a
+ ld l,a
+ adc hi (graphics>>1)
+ sub l
+ ld h,a
+ add hl,hl
+printchr21 ld a,(hl)
+ and c
+ res 6,d
+ ld (de),a
+ set 6,d
+ ld (de),a
+ inc l
+ inc e
+ ld a,(hl)
+ and c
+ res 6,d
+ ld (de),a
+ set 6,d
+ ld (de),a
+ inc l
+ dec e
+ ld a,d
+ add 8
+ ld d,a
+ jr nc,printchr21
+printchr1_ pop hl
+printspc2_ ;
+ ld a,d
+ sub $40
+ ld d,a
+ inc e
+ inc de
+ jr print00
+
+printhalf ; HL=^ASCIZ; HL+++,ABCDE!
+ ld de,printspc1
+ ld bc,printchr1
+ jr printhalf_
+printfull ; HL=^ASCIZ; HL+++,ABCDE!
+ ld de,printspc2
+ ld bc,printchr2
+printhalf_ ;
+ ld (print20+3),de
+ ld (print30+3),bc
+print00 ld a,(hl)
+ inc hl
+ and a
+ ret z
+ cp $10 ; $01..$0F
+ jr nc,print10
+ push hl
+ add lo colourmap
+ ld l,a
+ ld h,hi colourmap
+ ld c,(hl)
+ pop hl
+ jr print00
+print10 cp $20 ; $10..$1F
+ jr nc,print20
+ push hl
+ and $0F
+ add lo colourmap
+ ld l,a
+ ld h,hi colourmap
+ ld b,(hl)
+ pop hl
+ jr print00
+print20 sub $30 ; $20..$2F
+ jp c,printspc1
+print30 cp $60-$30 ; $30..$5F
+ jp c,printchr1
+print60 add $30 ; $60..$7F
+ add a
+ add a
+ add a
+ ld e,a
+ ld a,(hl)
+ inc hl
+ and a
+ rra
+ rr e
+ rra
+ rr e
+ ld d,a
+ ld a,(vram)
+ or d
+ ld d,a
+ jr print00
+
+; ---- torre: preparacion y dibujado ----
+
+tower_setmap ; A=STYLE; ABCDEHL!
+ add a
+ add a
+ add a
+ add a
+ add a
+ add a
+ ld l,a
+ ld h,hi tower_maps
+ ld de,towerpush
+ ld bc,$40
+ ldir
+ ld hl,towerpush
+ ld c,$C0
+ ldir
+ ret
+
+tower_setink ; A=INK1:INK2; ADEHL!
+ push af
+ rrca
+ rrca
+ rrca
+ rrca
+ call tower_setink_
+ ld d,a
+ pop af
+ call tower_setink_
+ ld e,a
+ ld h,d
+ ld a,d
+ and $AA
+ ld l,a
+ ld a,e
+ and $55
+ or l
+ ld l,a
+ ld (tower_inks+1),hl
+ ld a,e
+ and $AA
+ ld h,a
+ ld a,d
+ and $55
+ or h
+ ld h,a
+ ld l,e
+ ld (tower_inks+4),hl
+ ret
+tower_setink_ and $0F
+ or lo colourmap
+ ld l,a
+ ld h,hi colourmap
+ ld a,(hl)
+ ret
+
+tower_draw ; HL=POSY:POSX; ABCDEHLXY!
+ ld c,l
+ ld a,h ; POSY
+ cpl
+ and $3F
+ ld l,a
+ ld h,hi towerpush
+ push hl
+ add $A0
+ ld l,a
+ ld a,(hl)
+ ld (hl),$F7
+ ld (tower_jump+1),a
+ ld (tower_jump+3),hl
+ ld a,c ; POSX
+ and $1E
+ add lo tower_gfs
+ ld l,a
+ ld h,hi tower_gfs
+ ld e,(hl)
+ inc l
+ ld d,(hl)
+ xor $10
+ ld l,a
+ ld c,(hl)
+ inc l
+ ld b,(hl)
+ ret
+tower_jump ld a,$3E
+ ld ($3232),a
+tower_inks ; 00 01 10 11
+ ld bc,$0101
+ ld de,$1111
+ ld a,(vram)
+ inc a
+ ld l,$10 ; VRAM+$0110
+ ret
+
+; ---- tabla precalculada para dibujar la torre en todos sus angulos ----
+
+tower_next macro lbl,vvv
+ if vvv+0
+ else
+  res 5,l
+ endif
+ add 8
+ bit 6,a
+lbl ret nz
+ ld a,l
+ add $40
+ ld l,a
+ ld a,h
+ adc 8-$40
+ ret
+ endm
+
+tower_gfzz macro lbl,r1,r2,vv
+ set 5,l
+ ld (lbl+1),sp
+ di
+ ld sp,hl
+ ld a,r2
+ ld r2,r1
+ dd vv,vv,vv,vv
+ ei
+lbl ld sp,$3131
+ ld r2,a
+ ld a,h
+ endm
+
+; en general, la idea es 1.- preparar el puntero a VRAM, 2.- dibujar todo de un tiron, 3.- calcular la siguiente linea
+
+tower_gf00 ld h,a
+ tower_gfzz tower_gf00sp,b,c,$C5C5C5C5
+ tower_next tower_gf00retnz
+tower_gf01 ld h,a
+ tower_gfzz tower_gf01sp,c,b,$C5C5C5C5
+ tower_next tower_gf01retnz
+tower_gf10 ld h,a
+ tower_gfzz tower_gf10sp,d,e,$D5D5D5D5
+ tower_next tower_gf10retnz
+tower_gf11 ld h,a
+ tower_gfzz tower_gf11sp,e,d,$D5D5D5D5
+ tower_next tower_gf11retnz
+
+ldhlbi = $2C70 ; "LD (HL),B: INC L"
+ldhlci = $2C71 ; "LD (HL),C: INC L"
+ldhldi = $2C72 ; "LD (HL),D: INC L"
+ldhlei = $2C73 ; "LD (HL),E: INC L"
+
+ldhlbd = $2D70 ; "LD (HL),B: DEC L"
+ldhlcd = $2D71 ; "LD (HL),C: DEC L"
+ldhldd = $2D72 ; "LD (HL),D: DEC L"
+ldhled = $2D73 ; "LD (HL),E: DEC L"
+
+tower_gfA0 ld h,a
+ dw ldhlci,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi
+ dw ldhlci,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhldi,ldhlbi
+ tower_next tower_gfA0retnz
+tower_gfA1 ld h,a
+ dw ldhlci,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi
+ dw ldhlbi,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhlbi
+ tower_next tower_gfA1retnz
+tower_gfA2 ld h,a
+ dw ldhlci,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlbi
+ dw ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlbi
+ tower_next tower_gfA2retnz
+tower_gfA3 ld h,a
+ dw ldhlci,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi
+ dw ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhldi
+ tower_next tower_gfA3retnz
+tower_gfA4 ld h,a
+ dw ldhlci,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi
+ dw ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhldi
+ tower_next tower_gfA4retnz
+tower_gfA5 ld h,a
+ dw ldhlbi,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi
+ dw ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhldi
+ tower_next tower_gfA5retnz
+tower_gfA6 ld h,a
+ dw ldhlbi,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlbi
+ dw ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhldi
+ tower_next tower_gfA6retnz
+tower_gfA7 ld h,a
+ dw ldhlbi,ldhlci,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhldi
+ dw ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhldi
+ tower_next tower_gfA7retnz
+tower_gfB0 ld h,a
+ dw ldhldi,ldhlci,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei
+ dw ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlci,ldhlei
+ tower_next tower_gfB0retnz
+tower_gfB1 ld h,a
+ dw ldhldi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei
+ dw ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlei
+ tower_next tower_gfB1retnz
+tower_gfB2 ld h,a
+ dw ldhldi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhlei
+ dw ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlei
+ tower_next tower_gfB2retnz
+tower_gfB3 ld h,a
+ dw ldhldi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei
+ dw ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlci
+ tower_next tower_gfB3retnz
+tower_gfB4 ld h,a
+ dw ldhldi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei
+ dw ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlci
+ tower_next tower_gfB4retnz
+tower_gfB5 ld h,a
+ dw ldhlei,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei
+ dw ldhlei,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlci
+ tower_next tower_gfB5retnz
+tower_gfB6 ld h,a
+ dw ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlei
+ dw ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhlbi,ldhlci
+ tower_next tower_gfB6retnz
+tower_gfB7 ld h,a
+ dw ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlci,ldhlei,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlci
+ dw ldhlei,ldhlei,ldhlei,ldhlei,ldhlei,ldhldi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlbi,ldhlei,ldhlei,ldhlei,ldhldi,ldhlci
+ tower_next tower_gfB7retnz
+
+; ---- dibujar azulejos ----
+
+; ... *!* ...
+
+brick_upper ld a,l
+ brick_drawi
+ ld l,a
+ ld a,h
+ brick_next brick_upper_jrnz
+ dec xl
+ jr nz,brick_upper
+
+ ld a,l
+ brick_drawiz
+ ld l,a
+ brick_next brick_half_jrnz
+
+; *!*
+
+
+ ld a,l
+ brick_drawiz
+ ld l,a
+
+brick_lower ld a,h
+ brick_next brick_lower_jrnz
+ ld a,l
+ brick_drawi
+ ld l,a
+ dec xl
+ jr nz,brick_lower
+
+; ... *!* ...
+
+; ---- dibujar sprites: ----
+
+calcvram macro ; D:E=POSY:POSX; HL=^VRAM,AF!
+ ld a,d
+ rlca
+ rlca
+ rlca
+ ld h,a
+ and $C0
+ xor e
+ ld l,a
+ ld a,(vram)
+ res 6,h
+ or h
+ ld h,a
+ endm
+
+sprite_bytei macro ; 10 us
+ ld a,(bc) ; 2
+ ld l,a ; 1
+ ld a,(de) ; 2
+ and (hl) ; 2
+ or l ; 1
+ ld (de),a ; 2
+ endm
+sprite_byted macro ; 14 us
+ ld a,(bc) ; 2
+ ld l,a ; 1
+ inc h ; 1
+ ld l,(hl) ; 2
+ dec h ; 1
+ ld a,(de) ; 2
+ and (hl) ; 2
+ or l ; 1
+ ld (de),a ; 2
+ endm
+
+sprite_draw ; HL=^SPRITE,DE=POSY:POSX,BC=LENY:LENX; BC=^SPRITE+++, DE=^VRAM+++
+ ld a,l
+ or h
+ ret z
+ ld a,c
+ ld xh,b
+ ld b,h
+ ld c,l
+ bit 0,c
+ jr nz,sprite_draw_
+
+; ---- al derecho... ----
+
+ neg
+ inc a
+ ld (sprite_drawifix+1),a
+ cp 1-6 ; solamente hay dos anchuras en uso, 4 y 6
+ ld a,sprite_bytei6-sprite_drawi_-2
+ jr z,$+4
+ ld a,sprite_bytei4-sprite_drawi_-2
+ ld (sprite_drawi_+1),a
+ calcvram ; NZ!
+sprite_drawi ; BC=^SPRITE,HL=^VRAM,XH=LENY; BC=^SPRITE+++,DE=^VRAM+++,XH=0,AHL!
+ jr sprite_drawinz
+
+sprite_bytei6 ; x6
+ sprite_bytei
+ inc c
+ inc e
+ sprite_bytei
+ inc bc
+ inc e
+sprite_bytei4 ; x4
+ sprite_bytei
+ inc c
+ inc e
+ sprite_bytei
+ inc bc
+ inc e
+ sprite_bytei
+ inc c
+ inc e
+ sprite_bytei
+ inc bc
+; inc e
+sprite_drawifix ld hl,$0800-5;6
+ add hl,de
+ bit 6,h
+sprite_drawijrnz jr nz,$+6
+ ld de,$40-$4000
+ add hl,de
+ dec xh
+sprite_drawinz ex de,hl
+ ld h,hi $0200 ; cfr. MASKFLIP
+sprite_drawi_ jr nz,sprite_bytei6
+ ret
+
+; ---- ...y al reves ----
+
+sprite_draw_ dec c ; *!*
+ dec a
+ ld (sprite_drawdfix+1),a
+ ld l,a
+ add e
+ ld e,a
+ ld a,l
+ cp 6-1 ; solamente hay dos anchuras en uso, 4 y 6
+ ld a,sprite_byted6-sprite_drawd_-2
+ jr z,$+4
+ ld a,sprite_byted4-sprite_drawd_-2
+ ld (sprite_drawd_+1),a
+ calcvram ; NZ!
+sprite_drawd ; BC=^SPRITE,HL=^VRAM,XH=LENY; BC+++,DE+++,XH=0,AHL!
+ jr sprite_drawdnz
+sprite_byted6 ; x6
+ sprite_byted
+ inc c
+ dec e
+ sprite_byted
+ inc bc
+ dec e
+sprite_byted4 ; x4
+ sprite_byted
+ inc c
+ dec e
+ sprite_byted
+ inc bc
+ dec e
+ sprite_byted
+ inc c
+ dec e
+ sprite_byted
+ inc bc
+; dec e
+sprite_drawdfix ld hl,$0800+5;6
+ add hl,de
+ bit 6,h
+sprite_drawdjrnz jr nz,$+6
+ ld de,$40-$4000
+ add hl,de
+ dec xh
+sprite_drawdnz ex de,hl
+ ld h,hi $0200 ; cfr. MASKFLIP
+sprite_drawd_ jr nz,sprite_byted6
+ ret
+
+; ==== MUSICA Y SONIDO ====
+
+writemsg ; A=BYTE,C=REG.; -
+ push bc
+ ld b,$F4
+ out (c),c
+ ld bc,$F6C0 ; SELECT REG.
+ out (c),c
+ dw $71ED ; CPC PLUS: OK!
+ ld b,$F4
+ out (c),a
+ ld bc,$F680 ; WRITE REG.
+ out (c),c
+ dw $71ED ; CPC PLUS: OK!
+ pop bc
+ ret
+
+CHIP_CPOSL =  0
+CHIP_CPOSH =  1
+CHIP_SPOSL =  2
+CHIP_SPOSH =  3
+CHIP_RPOSL =  4
+CHIP_RPOSH =  5
+CHIP_LOOPL =  6
+CHIP_LOOPH =  7
+CHIP_NTIME =  8
+CHIP_CTIME =  9
+CHIP_NSIZE = 10
+CHIP_CSIZE = 11
+CHIP_NAMPL = 12
+CHIP_CAMPL = 13
+CHIP_NNOTE = 14
+CHIP_CNOTE = 15
+CHIP_FREQL = 16
+CHIP_FREQH = 17
+CHIP_ENV_A = 18
+CHIP_ENT_A = 19
+CHIP_ENT_L = 20
+CHIP_ENT_H = 21
+CHIP_LOOPZ = 22
+CHIP_ONOTE = 23
+CHIP_BYTES = 24
+
+chip_init ; -; !
+ ld hl,chip_temp+CHIP_CPOSL
+ ld de,CHIP_BYTES-1
+ ld bc,$030A
+ xor a
+chip_init_ call writemsg
+ ld (hl),a
+ inc hl
+ ld (hl),a
+ add hl,de
+ dec c
+ djnz chip_init_
+; ld c,7
+ ld a,$38
+ jp writemsg
+
+chip_song ; HL=^SONG; HL+=6, A=2,BCDE!
+ xor a
+ call chip_song_
+ call chip_song_
+chip_song_ ld e,(hl)
+ inc hl
+ ld d,(hl)
+ inc hl
+chip_chan ; A=0..2,DE=^TRACK; B=0,C!
+ inc a
+ push af
+ push hl
+ ld hl,chip_temp-CHIP_BYTES
+ ld bc,CHIP_BYTES
+ add hl,bc
+ dec a ; =0
+ jr nz,$-2
+ ld b,4
+ ld (hl),e
+ inc hl
+ ld (hl),d
+ inc hl
+ djnz $-4 ; CHIP_CPOS#,CHIP_RPOS#,CHIP_SPOS#,CHIP_LOOP#
+ inc a ; =1
+ ld b,4
+ ld (hl),a
+ inc hl
+ djnz $-2 ; CHIP_#TIME,CHIP_#SIZE
+ ld (hl),-1 ; CHIP_NAMPL
+ xor a ; =0
+ ld b,CHIP_BYTES-CHIP_CAMPL
+ inc hl
+ ld (hl),a
+ djnz $-2
+ pop hl
+ pop af
+ ret
+
+chip_play ; -; ABCDEHLX!
+ ld bc,0
+ ld ix,chip_temp
+ call chip_play_
+ inc c
+ ld ix,chip_temp+CHIP_BYTES
+ call chip_play_
+ inc c
+ ld ix,chip_temp+CHIP_BYTES+CHIP_BYTES
+chip_play_ ; B=0,C=0..2,IX=^CHAN; !
+ ld e,(ix+CHIP_CPOSL)
+ ld d,(ix+CHIP_CPOSH)
+ ld a,e
+ or d
+ jr z,chip_play_mute
+ dec (ix+CHIP_CTIME)
+ jr nz,chip_play_filt
+ ld a,(ix+CHIP_NTIME)
+ ld (ix+CHIP_CTIME),a
+ dec (ix+CHIP_CSIZE)
+ jr nz,chip_play_filt
+chip_play_read ld a,(de)
+ inc de
+ cp $90 ; $00..$8F: nota o silencio
+ jr c,chip_play_note
+ sub $F0 ; $F0..$FF: comando especial
+ jr nc,chip_play_func
+ sub $8F-$F0 ; $90..$EF: duracion
+ ld (ix+CHIP_NSIZE),a
+ jr chip_play_read
+chip_play_func jr z,chip_play_stop
+ ld hl,chip_play_read
+ push hl
+ add a
+ add lo (chip_play_funcs-2)
+ ld l,a
+ adc hi (chip_play_funcs-2)
+ sub l
+ ld h,a
+ ld a,(hl)
+ inc hl
+ ld h,(hl)
+ ld l,a
+ jp (hl)
+
+chip_play_note ; crear nota nueva
+ ld (ix+CHIP_CPOSL),e
+ ld (ix+CHIP_CPOSH),d
+ ld e,(ix+CHIP_NSIZE)
+ ld (ix+CHIP_CSIZE),e
+ cp $8F
+ jr nc,chip_play_hold ; silencio
+ add (ix+CHIP_NNOTE)
+ jp s,chip_play_hold ; overflow!
+ ld (ix+CHIP_CNOTE),a
+ ld e,a
+ ld a,(ix+CHIP_NAMPL)
+ ld (ix+CHIP_CAMPL),a
+ and a
+ jr z,chip_play_mute
+ ld a,(ix+CHIP_ENT_A)
+ and 1<<5 ; VIBRATO/ARPEGGIO?
+ or (ix+CHIP_ENT_H)
+ ld (ix+CHIP_ENT_A),a
+ ld a,e
+ jr chip_play_freq
+chip_play_stop ; fin de la pista
+ ld (ix+CHIP_CPOSL),b
+ ld (ix+CHIP_CPOSH),b
+chip_play_hold ld (ix+CHIP_CAMPL),b ; silencio
+chip_play_filt ld a,(ix+CHIP_CAMPL)
+ and a
+chip_play_mute ; ZF=SILENCIO?, A=AMPL, E=NOTE
+ jp z,chip_play_exit
+
+; envolvente de volumen
+ ld l,(ix+CHIP_ENV_A)
+ call chip_play_addlfix
+ ld (ix+CHIP_CAMPL),a
+
+; vibrato y arpeggio
+ ld a,(ix+CHIP_ENT_A)
+ bit 5,a
+ jr z,chip_play_arpeggio
+; vibrato: + - - + ...
+ dec a
+ ld (ix+CHIP_ENT_A),a
+ ld e,a
+ and $0F
+ jr nz,chip_play_done
+ ld a,e
+ add 1<<6
+ add (ix+CHIP_ENT_H)
+ ld (ix+CHIP_ENT_A),a
+ ld l,(ix+CHIP_ENT_L)
+ ld a,(ix+CHIP_FREQL)
+ ld h,(ix+CHIP_FREQH)
+ jp s,chip_play_vibrato
+ add l
+ ld l,a
+ adc h
+ sub l
+ jr chip_play_vibrato_
+chip_play_vibrato ;
+ sub l
+ ld l,a
+ sbc a
+ add h
+chip_play_vibrato_ ld h,a
+ jr chip_play_freq_
+chip_play_arpeggio add 1<<6
+ jr c,$-2
+; arpeggio: +0 +H +L +0 +H +L...
+ ld (ix+CHIP_ENT_A),a
+ and $C0
+ add a
+ ld a,(ix+CHIP_ENT_H)
+ jr nc,chip_play_arpeggio_
+ ld a,b
+ jr nz,chip_play_arpeggio_
+ ld a,(ix+CHIP_ENT_L)
+chip_play_arpeggio_ add (ix+CHIP_CNOTE)
+
+ cp (ix+CHIP_ONOTE)
+ jr z,chip_play_done
+chip_play_freq ld (ix+CHIP_ONOTE),a
+ add a
+ add lo chip_freqs
+ ld l,a
+ adc hi chip_freqs
+ sub l
+ ld h,a
+ ld a,(hl)
+ inc hl
+ ld h,(hl)
+ ld l,a
+chip_play_freq_ ; HL=FREQ!
+ ld (ix+CHIP_FREQL),l
+ ld (ix+CHIP_FREQH),h
+ sla c
+ ld a,l
+ call writemsg
+ inc c
+ ld a,h
+ call writemsg
+ sra c
+chip_play_done ld a,(ix+CHIP_CAMPL)
+ rrca
+ rrca
+ rrca
+ rrca
+ and $0F
+chip_play_exit ; A=AMPL(0..15)
+ push bc
+ set 3,c
+ jp writemsg+1 ; saltarse "PUSH BC"
+
+chip_play_addlfix ; A+=L sin desbordamiento
+ add l
+ bit 7,l
+ jr nz,$+4
+ ret nc
+ sbc a
+ ret c
+ xor a
+ ret
+
+chip_play_func1 ; $F1: RETURN FROM CALL
+ ld e,(ix+CHIP_SPOSL)
+ ld d,(ix+CHIP_SPOSH)
+ ld l,(ix+CHIP_RPOSL)
+ ld h,(ix+CHIP_RPOSH)
+chip_play_func1_ ; cfr. $F2,$F3
+ ld (ix+CHIP_SPOSL),l
+ ld (ix+CHIP_SPOSH),h
+ ret
+chip_play_func2 ; $F2: LONG RELATIVE CALL
+ call chip_play_func2_
+ ld d,(hl)
+ inc hl
+ jr chip_play_func3_
+chip_play_func3 ; $F3: SHORT RELATIVE CALL
+ call chip_play_func2_
+ ld a,e
+ add a
+ sbc a
+ ld d,a
+chip_play_func3_ call chip_play_func1_
+ add hl,de
+ ex de,hl
+ ret
+chip_play_func2_ ex de,hl
+ ld e,(ix+CHIP_SPOSL)
+ ld d,(ix+CHIP_SPOSH)
+ ld (ix+CHIP_RPOSL),e
+ ld (ix+CHIP_RPOSH),d
+ ld e,(hl)
+ inc hl
+ ret
+chip_play_func4 ; $F4: LOOP N TIMES (0=INIT)
+ ld a,(de)
+ inc de
+ and a
+ jr z,chip_play_func4_
+ ld (ix+CHIP_LOOPL),e
+ ld (ix+CHIP_LOOPH),d
+ ld (ix+CHIP_LOOPZ),a
+ ret
+chip_play_func4_ dec (ix+CHIP_LOOPZ)
+ ret z
+ ld e,(ix+CHIP_LOOPL)
+ ld d,(ix+CHIP_LOOPH)
+ ret
+
+chip_play_func5 ; $F5: SET TRACK TEMPO
+ ld a,(de)
+ ld (ix+CHIP_NTIME),a
+ ld (ix+CHIP_CTIME),a
+ inc de
+ ret
+
+chip_play_func6 ; $F6: SET NOTE OFFSET
+ ld a,(de)
+ ld (ix+CHIP_NNOTE),a
+ inc de
+ ret
+chip_play_func7 ; $F7: ADD NOTE OFFSET
+ ld a,(de)
+ add (ix+CHIP_NNOTE)
+ ld (ix+CHIP_NNOTE),a
+ inc de
+ ret
+
+chip_play_func8 ; $F8: SET NOTE VOLUME
+ ld a,(de)
+ ld (ix+CHIP_NAMPL),a
+ inc de
+ ret
+chip_play_func9 ; $F9: ADD NOTE VOLUME
+ ld a,(de)
+ ld l,a
+ ld a,(ix+CHIP_NAMPL)
+ call chip_play_addlfix
+ ld (ix+CHIP_NAMPL),a
+ inc de
+ ret
+
+chip_play_funcD ; $FD: VIBRATO +-L xH
+ ld a,(de)
+ and a
+ jr z,chip_play_funcD0 ; 0=DISABLE!
+ ld (ix+CHIP_ENT_A),1<<5
+ jr chip_play_funcD_
+chip_play_funcC ; $FC: ARPEGGIO 0+H+L
+ ld a,(de)
+chip_play_funcD0 ld (ix+CHIP_ENT_A),b
+chip_play_funcD_ ; ENT_L+ENT_H
+ rrca
+ rrca
+ rrca
+ rrca
+ and $0F
+ ld (ix+CHIP_ENT_H),a
+ ld a,(de)
+ and $0F
+ ld (ix+CHIP_ENT_L),a
+ inc de
+ ret
+chip_play_funcE ; $FE: VOLUME ENVELOPE
+ ld a,(de)
+ ld (ix+CHIP_ENV_A),a
+chip_play_funcA ; $FA: SET NOISE (no se usa)
+chip_play_funcB ; $FB: ADD NOISE (no se usa)
+chip_play_funcF ; $FF: NOISE ENVELOPE (no se usa)
+ inc de
+ ret
+
+chip_play_funcs ;
+ dw chip_play_func1,chip_play_func2,chip_play_func3,chip_play_func4,chip_play_func5
+ dw chip_play_func6,chip_play_func7,chip_play_func8,chip_play_func9,chip_play_funcA
+ dw chip_play_funcB,chip_play_funcC,chip_play_funcD,chip_play_funcE,chip_play_funcF
+
+chip_freqz macro vv
+ dw (($1DDD>>vv)+1)/2,(($1C2F>>vv)+1)/2,(($1A9A>>vv)+1)/2,(($191C>>vv)+1)/2,(($17B3>>vv)+1)/2,(($165F>>vv)+1)/2
+ dw (($151D>>vv)+1)/2,(($13EE>>vv)+1)/2,(($12D0>>vv)+1)/2,(($11C1>>vv)+1)/2,(($10C2>>vv)+1)/2,(($0FD2>>vv)+1)/2 ; 62500.000000!
+ endm
+
+chip_freqs
+ chip_freqz 0
+ chip_freqz 1
+ chip_freqz 2
+ chip_freqz 3
+ chip_freqz 4
+ chip_freqz 5
+ chip_freqz 6
+ chip_freqz 7
+ chip_freqz 8
+ chip_freqz 9
+
+; ==== DATOS: TEXTOS, NIVELES, GRAFICOS... ====
+
+inks db "XT@KPUWS\\LNJHGVR@"
+
+textinit ;
+ db $11,$09 ; PAPER,PEN
+ db $60+1,1,"SCORE" ; X,Y,TEXT
+ db $60+16,1,"HI-SCORE" ; X,Y,TEXT
+textscore db $03,$60+7,1,"0000"
+textscore_ db "00" ; X,Y,TEXT
+texthiscore db $03,$60+25,1,"0000"
+texthiscore_ db "00" ; X,Y,TEXT
+ db 0 ; EOT
+
+textmenu db $11
+ db $03,$60+1,25,"V>1",$0F," POR ",$0B,"CESAR NICOLAS GONZALEZ"
+ db $60+1,26,$07,"_CNGSOFT_ ",$0F,"PARA ",$03,"CPC RETRODEV^15",0
+
+textinfo1 db $11
+ db $60+3, 9,$03,"LANZAROTE DEL LAGO",$07," HA SIDO"
+ db $60+3,10,"HECHIZADO POR LA DIABOLICA"
+ db $60+3,11,$03,"MORGANA",$07," Y SE HA CONVERTIDO"
+ db $60+3,12,"EN UN SIMPLE BATRACIO>"
+
+ db $60+3,14,"LO UNICO QUE LE RESTITUIRA"
+ db $60+3,15,"LA APARIENCIA HUMANA ES UN"
+ db $60+3,16,$03,"BESO DE AMOR",$07,"< PERO ",$03,"GINEBRA",$07
+ db $60+3,17,"ESTA PRESA EN LA ",$03,"FORTALEZA"
+ db $60+3,18,"DE LA GUARDIA DOLOROSA>",0
+
+textinfo2 db $11
+ db $60+3+4,9,$09,"TECLAS DE CONTROL:"
+
+ db $60+3,11,$0B,"Z\\N\\R"
+ db $60+20,11,$03,"IZQUIERDA"
+ db $60+3,12,$0B,"X\\M\\T"
+ db $60+20,12,$03,"DERECHA"
+ db $60+3,13,$0B,"ESPACIO\\G\\F"
+ db $60+20,13,$03,"SALTO"
+ db $60+3,14,$0F,"TAMBIEN SE PUEDEN UTILIZAR"
+ db $60+3,15,"LOS CURSORES Y EL JOYSTICK"
+
+ db $60+3,17,$0B,"P"
+ db $60+20,17,$03,"PAUSA"
+ db $60+3,18,$0B,"ESC"
+ db $60+20,18,$03,"ABANDONAR",0
+
+textinfo3 db $11
+ db $60+8,9,$09,"AGRADECIMIENTOS:"
+
+ db $60+3,11,$0B,"JOHN M> PHILLIPS",$0F," GOMINOLAS"
+ db $60+3,12,$07,"JORGE GRANADOS",$03," ROB HUBBARD"
+ db $60+3,13,$0D,">>Y TODOS LOS DEMAS QUE ME"
+ db $60+3,14,"DIERON TANTOS BUENOS RATOS"
+
+ db $60+3,16,$07,"MIS AMIGOS",$03," BEN R>< DANIEL<"
+ db $60+3,17,"EDDY=BOY< EPI< JAVI< JOSE:"
+ db $60+3,18,$0B,"POR LOS ANIMOS Y LAS IDEAS"
+ db 0
+
+textinfo4 db $11
+ db $60+10,9,$09,"COMENTARIOS:"
+
+ db $60+3,11,$03,"ESTA ES LA ",$07,"PRIMERA VERSION",$03
+ db $60+4,12,"DEL JUEGO: HABIA QUERIDO"
+ db $60+3,13,"METER MAS COSAS< HACER MAS"
+ db $60+4,14,"NIVELES< ESCRIBIR CODIGO"
+ db $60+3,15,"MAS LEGIBLE Y EFICIENTE>>>"
+ db $60+3,16,"PERO LA ",$0B,"UNED",$03," ME HIZO PASAR"
+ db $60+3,17,"UN VERANO MUY DIFICIL Y AL"
+ db $60+3,18,"FINAL ME HA TOCADO CORRER>"
+ db 0
+
+gametext db $11,$03
+ db $60+12,12,"TORRE "
+gametextround db "00"
+ db $60+12,15,"VIDAS "
+gametextlives db "00"
+ db 0
+
+overtext db $03
+ db $60+14,13,"GAME"
+ db $60+14,14,"OVER",0
+
+; Version libre de "The Human Race" (4/6) de David Whittaker
+
+menusong dw humanrc4_a,humanrc4_c,humanrc4_b
+gamesong dw humanrc4_d,0,humanrc4_e
+
+humanrc4_d db $00F8,$CF
+ db $00F2
+ dw humanrc4_d_-$-2
+humanrc4_e db $00F8,$CF
+ db $00F2
+ dw humanrc4_e_-$-2
+
+humanrc4_a db $00F6,+2
+humanrc4_e_ db $00F5,6,$00FE,-6
+ dd $F300F3 ; set loop
+ db $00F2
+ dw humanrc4_aa-$-2
+ db $00F2
+ dw humanrc4_ab-$-2
+ db $00F2
+ dw humanrc4_ac-$-2
+ db $00F2
+ dw humanrc4_ad-$-2
+ db $00F2
+ dw humanrc4_aa-$-2
+ db $00F2
+ dw humanrc4_ae-$-2
+ db $00F2
+ dw humanrc4_af-$-2
+ db $00F2
+ dw humanrc4_ad-$-2
+ db $00F2
+ dw humanrc4_aa-$-2
+ db $00F2
+ dw humanrc4_ab-$-2
+ db $00F2
+ dw humanrc4_ac-$-2
+ db $00F2
+ dw humanrc4_ad-$-2
+ db $00F2
+ dw humanrc4_aa-$-2
+ db $00F2
+ dw humanrc4_ab-$-2
+ db $00F2
+ dw humanrc4_ac-$-2
+ db $00F2
+ dw humanrc4_ad-$-2
+ db $00F2
+ dw humanrc4_aa-$-2
+ db $00F2
+ dw humanrc4_ab-$-2
+ db $00F2
+ dw humanrc4_ac-$-2
+ db $00F2
+ dw humanrc4_ad-$-2
+ db $00F2
+ dw humanrc4_aa-$-2
+ db $00F2
+ dw humanrc4_ae-$-2
+ db $00F2
+ dw humanrc4_af-$-2
+ db $00F2
+ dw humanrc4_ad-$-2
+ db $00F2
+ dw humanrc4_aa-$-2
+ db $00F2
+ dw humanrc4_ab-$-2
+ db $00F2
+ dw humanrc4_ac-$-2
+ db $00F2
+ dw humanrc4_ad-$-2
+ db $00F2
+ dw humanrc4_aa-$-2
+ db $00F2
+ dw humanrc4_ae-$-2
+ db $00F2
+ dw humanrc4_af-$-2
+ db $00F2
+ dw humanrc4_ad-$-2
+ db $00F2
+ dw humanrc4_aa-$-2
+ db $00F2
+ dw humanrc4_ae-$-2
+ db $00F2
+ dw humanrc4_af-$-2
+ db $00F2
+ dw humanrc4_ad-$-2
+ db $00F1
+
+humanrc4_aa
+ db $8F+2,32,32,32-12,32,$8F+1,32,32,$8F+2,32,32-12,$8F+1,32,32,$8F+2,32,32,32-12,32,$8F+1,32,32,$8F+2,32,32-12,$8F+1,32,32,$00F1
+humanrc4_ab
+ db $8F+2,30,30,30-12,30,$8F+1,30,30,$8F+2,30,30-12,$8F+1,30,30,$8F+2,30,30,30-12,30,$8F+1,30,30,$8F+2,30,30-12,$8F+1,30,30,$00F1
+humanrc4_ac
+ db $8F+2,37,37,37-12,37,$8F+1,37,37,$8F+2,37,37-12,$8F+1,37,37,$8F+2,35,35,37-12,35,$8F+1,35,35,$8F+2,35,37-12,$8F+1,35,35,$00F1
+humanrc4_ad
+ db $8F+2,28,28,28-12,28,$8F+1,28,28,$8F+2,28,28-12,$8F+1,28,28,$8F+2,30,30,28-12,30,$8F+1,30,30,$8F+2,30,28-12,$8F+1,30,30,$00F1
+humanrc4_ae
+ db $8F+2,35,35,35-12,35,$8F+1,35,35,$8F+2,35,35-12,$8F+1,35,35,$8F+2,35,35,35-12,35,$8F+1,35,35,$8F+2,35,35-12,$8F+1,35,35,$00F1
+humanrc4_af
+ db $8F+2,37,37,37-12,37,$8F+1,37,37,$8F+2,37,37-12,$8F+1,37,37,$8F+2,37,37,37-12,37,$8F+1,37,37,$8F+2,37,37-12,$8F+1,37,37,$00F1
+
+humanrc4_b db $00F6,+2,$00F5,6,$00F8,$DF,$00FE,-3
+ db $8F+32
+ dd $F300F3 ; set loop
+
+ db $00F3,humanrc4_ba-$-2
+ db $00F3,humanrc4_bb-$-2
+ db $00F3,humanrc4_bc-$-2
+ db $00F3,humanrc4_bd-$-2
+ db $00F3,humanrc4_ba-$-2
+ db $00F3,humanrc4_bd-$-2
+ db $00F3,humanrc4_bc-$-2
+ db $00F3,humanrc4_bd-$-2
+ db $00F3,humanrc4_ba-$-2
+ db $00F3,humanrc4_bb-$-2
+ db $00F3,humanrc4_bc-$-2
+ db $00F3,humanrc4_bd-$-2
+ db $00F3,humanrc4_ba-$-2
+ db $00F3,humanrc4_bb-$-2
+ db $00F3,humanrc4_bc-$-2
+ db $00F3,humanrc4_bd-$-2
+ db $00F3,humanrc4_ba-$-2
+ db $00F3,humanrc4_bb-$-2
+ db $00F3,humanrc4_bc-$-2
+ db $00F3,humanrc4_bd-$-2
+ db $00F3,humanrc4_ba-$-2
+ db $00F3,humanrc4_bd-$-2
+ db $00F3,humanrc4_bc-$-2
+ db $00F3,humanrc4_bd-$-2
+ db $00F3,humanrc4_ba-$-2
+ db $00F3,humanrc4_bb-$-2
+ db $00F3,humanrc4_bc-$-2
+ db $00F3,humanrc4_bd-$-2
+ db $00F3,humanrc4_ba-$-2
+ db $00F3,humanrc4_bd-$-2
+ db $00F3,humanrc4_bc-$-2
+ db $00F3,humanrc4_bd-$-2
+ db $00F3,humanrc4_ba-$-2
+ db $00F3,humanrc4_bd-$-2
+ db $00F3,humanrc4_bc-$-2
+ db $00F3,humanrc4_bd-$-2
+ db $00F1
+
+humanrc4_ba db $00FC,$37,$8F+4,15,$8F+8,12+44,$8F+4,15,15,$8F+8,12+44,$8F+4,12+44,$00F1 ;48+3
+humanrc4_bb db $00FC,$47,$8F+4,15,$8F+8,12+42,$8F+4,15,15,$8F+8,12+42,$8F+4,12+42,$00F1 ;48+1
+humanrc4_bc db $00FC,$37,$8F+4,15,$8F+8,12+37,$8F+4,15,15,$8F+8,12+37,$8F+4,12+37,$00F1 ;48-4
+humanrc4_bd db $00FC,$38,$8F+4,15,$8F+8,12+39,$8F+4,15,15,$8F+8,12+39,$8F+4,12+39,$00F1 ;48-1
+
+humanrc4_c db $00F6,+2
+humanrc4_d_ db $00F5,6,$00FD,$41
+ dd $F300F3 ; set loop
+ db $00FE,-1
+ db $00F2
+ dw humanrc4_ca-$-2
+ db $00F2
+ dw humanrc4_cb-$-2
+ db $00F2
+ dw humanrc4_ca-$-2
+ db $8F+2
+ db $00FE,-12
+ db 63,71,71,63,73,73,70,71,63,71,71,63,70,70,66,68
+ db 61,71,71,61,73,73,70,71,61,71,71,63,70,70,68,66
+ db 61,64,64,61,68,68,64,66,54,64,64,54,63,63,64,66
+ db 59,66,66,59,68,68,66,68,61,70,70,61,71,71,70,68
+ db $00FE,-1
+ db $00F2
+ dw humanrc4_cb-$-2
+ db $8F+1
+ db $00FE,-24
+ db $00F4,2
+ db $00F2
+ dw humanrc4_cc-$-2
+ db $00F2
+ dw humanrc4_cc-$-2
+ db 61,61,$8F+2,59,64,$8F+1,61,59,61,61,59,$8F+2,64,$8F+1,64,61,$8F+2,61,$8F+1,59,61,59,$8F+2,64,$8F+1,61,59,64,64,63,64,63,61,59,61
+ db 68,68,$8F+2,66,68,$8F+1,68,66,68,68,66,$8F+2,68,$8F+1,68,66,$8F+2,68,$8F+1,68,68,66,$8F+2,68,$8F+1,68,66,71,71,70,71,70,68,66,68
+ db $00F4,0
+ db $00F1
+
+humanrc4_ca db $8F+6,51,59,$8F+4,61,$8F+6,51,59,$8F+4,58
+ db $8F+6,49,59,$8F+4,61,$8F+6,59,58,$8F+2,56,54
+ db $8F+12,52,$8F+4,54,$8F+6,52,51,$8F+4,52
+ db $8F+6,54,$8F+10,56,$8F+6,59,$8F+10,58,$00F1
+humanrc4_cb db $8F+16,44,$8F+8,51,$8F+6,56,$8F+2,55
+ db $8F+32,54
+ db $8F+16,49,$8F+8,56,$8F+6,61,$8F+2,60
+ db $8F+16,59,$8F+2,58,59,58,$8F+4,54,$8F+2,51,$8F+4,56
+ db $00F9,-16,$00FE,-16
+ db 15,$00FE,0,$8F+2,51,54,59,58,$8F+1,54,55,$8F+2,56,$8F+12,51,$8F+4,$00FE,-16,15
+ db 15,$00FE,0,$8F+2,49,54,59,58,56,54,$8F+12,58,$8F+4,$00FE,-16,15
+ db 15,$00FE,0,$8F+2,49,52,56,54,52,54,$8F+6,52,51,$8F+4,52
+ db $00F9,+16,$00FE,-1
+ db 52,53,$8F+8,54,59,58
+ db $00F1
+humanrc4_cc db 56,56,$8F+2,54,59,$8F+1,56,54,56,56,54,$8F+2,59,$8F+1,59,56,$8F+2,54,$8F+1,54,56,54,$8F+2,59,$8F+1,56,54,59,59,58,59,58,56,54,56,$00F1
+
+goalsong dw justindbg1,justindbg2,justindbg3 ; fanfarria generica, usada ya en mi "Justin"
+justindbg1 db $00FE,-16,$00F6,3+12,$00F5,6
+justindbg3_ db 0+24,0+24,2+24,2+24,4+24,4+24,5+24,5+24
+ db 7+24,7+24,9+24,11+24,$8F+4,$00FE,-4,12+24
+ db $00F0
+justindbg2 db $00FE,-8,$00F6,3+48,$00F5,6
+ db $00FC,$38,4,4,$00FC,$49,5,5,7,7,$00FC,$38,9,9,11,11,$00FC,$49,12,$00FC,$39,14,$8F+4,$00FE,-2,$00FC,$38,16
+ db $00F0
+justindbg3 db $00FE,-16,$00F6,3+36,$00F5,6
+ db $00F3,justindbg3_-$-2
+
+zerosong dw 0,0,0
+
+ultimatesfx db $00F5,4,$00F6,+12,$00FE,-128,3*12+1,3*12+4,3*12+7,3*12+11,4*12+4,4*12+11,5*12+11,$00F0
+volatilesfx db 56,54,52,50,48,$00F9,-16,46,44,42,40,38,$00F9,-16,36,34,32,30,$00F0
+headbuttsfx db 44,48,52,$00F0
+damagesfx db 50,60,70,80,$00F0
+calabazasfx db $00F7,-24
+miniboingsfx db $00F8,$EF,$00F7,+12
+boingsfx db $00F7,+18,30,32,34,36,$00F9,-16,38,40,42,44,46,$00F9,-16,48,50,52,54,56,$00F0
+warphsfx db $00FE,-4,$00FC,$0C,$8F+3,36,$8F+21,60,$00F0
+warpvsfx db $00FE,-4,$00FC,$0C,$8F+3,60,$8F+21,36,$00F0
+powerupsfx db $00FE,-8,$8F+3,$00FD,$21,72,76,74,79,$8F+36,76,$00F0
+
+; ---- mapas de los niveles ----
+
+levels
+ dw level1,((level2-level1)/8)+256*$89
+ dw level2,((level3-level2)/8)+256*$9A
+ dw level3,((level4-level3)/8)+256*$AB
+ dw level4,((level5-level4)/8)+256*$EF
+ dw level5,((level6-level5)/8)+256*$67
+ dw level6,((level7-level6)/8)+256*$56
+ dw level7,((level8-level7)/8)+256*$CD
+ dw level8,((level9-level8)/8)+256*$93
+levels_
+
+; 0 = vacio
+; 1/3/5 = blanco/cian/amarillo: solido
+; 2 = azul: teleport horizontal al lado opuesto
+; 4 = rojo: teleport vertical al 4 mas cercano
+; 6 = rosa: se rompe
+; 7 = verde: hace saltar!
+
+; 8 = condensador de fluzo (pegado al suelo) / mano de piedra (en el aire)
+; 9 = bola
+; A = caracol
+; B = calabaza
+; C = fantasma
+; D = slime
+; E = guardia
+; F = brujo
+
+level1
+ db $11,$11,$00,$00,$00,$00,$00,$00
+ db $00,$00,$50,$00,$00,$00,$00,$00
+ db $00,$00,$05,$00,$00,$00,$00,$00
+ db $00,$00,$08,$50,$00,$00,$00,$00
+ db $00,$00,$00,$05,$00,$00,$00,$00
+ db $00,$00,$00,$00,$11,$11,$11,$11
+ db $50,$00,$00,$00,$00,$00,$00,$00
+ db $05,$00,$00,$00,$00,$00,$00,$00
+ db $00,$50,$00,$00,$00,$00,$00,$00
+ db $00,$05,$00,$00,$00,$00,$00,$00
+ db $00,$00,$11,$11,$11,$11,$00,$00
+ db $00,$00,$00,$00,$00,$00,$50,$00
+ db $00,$00,$00,$00,$00,$00,$05,$00
+ db $00,$00,$00,$00,$00,$00,$08,$50
+ db $80,$00,$00,$00,$00,$00,$00,$05
+ db $11,$11,$11,$11,$00,$00,$00,$00
+ db $00,$00,$00,$00,$50,$00,$00,$00
+ dd 0,0,0,0
+ db $00,$00,$00,$00,$00,$05,$00,$00
+ db $11,$11,$00,$00,$00,$00,$11,$11
+ db $00,$00,$50,$00,$00,$00,$00,$00
+ db $00,$00,$05,$00,$00,$00,$00,$00
+ db $00,$00,$08,$50,$00,$00,$00,$00
+ db $00,$00,$00,$05,$00,$08,$00,$00
+ db $00,$00,$00,$00,$56,$66,$66,$11
+ db $50,$00,$00,$00,$00,$00,$05,$00
+ db $05,$00,$00,$00,$00,$00,$50,$00
+ db $00,$50,$00,$00,$00,$05,$00,$00
+ db $00,$05,$00,$00,$00,$50,$00,$00
+ db $00,$00,$11,$11,$41,$00,$00,$00
+ dd 0,0,0,0,0,0,0,0
+ db $00,$00,$00,$00,$40,$00,$00,$00
+ db $00,$00,$00,$05,$05,$00,$00,$00
+ db $00,$00,$00,$50,$00,$50,$00,$00
+ db $00,$00,$05,$00,$00,$05,$00,$00
+ db $00,$00,$50,$00,$00,$00,$50,$00
+level2
+ db $11,$00,$00,$00,$00,$00,$00,$01
+ dd 0,0
+ db $00,$07,$77,$00,$00,$00,$0C,$00
+ dd 0,0
+ db $00,$00,$00,$07,$77,$00,$00,$00
+ dd 0,0
+ db $00,$00,$00,$00,$00,$07,$77,$00
+ dd 0,0
+ db $77,$00,$00,$00,$00,$00,$00,$07
+ db $00,$C0,$00,$00,$00,$00,$00,$00
+ db $00,$07,$77,$00,$00,$00,$00,$00
+ dd 0,0
+ db $00,$80,$00,$07,$77,$00,$00,$00
+ db $35,$35,$35,$35,$35,$34,$35,$35
+ dd 0,0,0,0,0,0,0,0
+ db $11,$14,$11,$12,$11,$14,$11,$12
+ db $30,$00,$00,$00,$08,$00,$00,$00
+ db $30,$00,$00,$00,$00,$00,$00,$00
+ db $30,$00,$00,$00,$00,$00,$00,$00
+ db $30,$00,$00,$00,$00,$00,$00,$00
+ db $30,$00,$00,$00,$00,$00,$00,$00
+ db $30,$00,$08,$00,$00,$00,$00,$00
+ db $11,$14,$11,$11,$11,$11,$00,$00
+ dd 0,0,0,0,0,0,0,0
+ db $33,$33,$00,$00,$00,$00,$33,$33
+ db $00,$D0,$00,$00,$00,$00,$0D,$00
+ dd 0,0,0,0,0,0
+ db $00,$00,$55,$55,$55,$55,$00,$00
+ dd 0,0,0,0,0,0,0,0
+level3
+ db $11,$41,$11,$21,$11,$11,$11,$21
+ db $00,$00,$30,$00,$00,$00,$00,$30
+ db $00,$00,$30,$00,$00,$00,$00,$30
+ db $00,$00,$30,$00,$00,$00,$00,$30
+ db $00,$00,$30,$00,$00,$00,$00,$30
+ db $21,$41,$10,$00,$26,$00,$00,$11
+ db $00,$00,$00,$00,$00,$60,$00,$00
+ db $00,$00,$00,$00,$00,$06,$00,$0C
+ db $00,$00,$00,$00,$00,$00,$60,$00
+ db $00,$00,$00,$00,$00,$00,$06,$00
+ db $00,$00,$00,$00,$00,$00,$00,$60
+ db $00,$00,$00,$00,$00,$00,$00,$06
+ db $77,$77,$00,$00,$06,$00,$00,$00
+ db $00,$00,$00,$00,$06,$00,$00,$00
+ db $0C,$00,$00,$00,$06,$00,$00,$00
+ db $00,$00,$00,$70,$06,$00,$00,$00
+ db $00,$00,$00,$00,$06,$00,$00,$00
+ db $08,$00,$00,$00,$06,$00,$00,$00
+ db $11,$11,$00,$00,$06,$00,$00,$00
+ dd 0,0,0,0,0,0
+ db $55,$55,$55,$55,$55,$00,$00,$00
+ db $00,$00,$00,$00,$00,$00,$00,$01
+ db $00,$00,$00,$00,$00,$00,$00,$10
+ db $00,$F0,$00,$00,$00,$00,$01,$00
+ db $00,$00,$00,$00,$00,$00,$10,$00
+ db $00,$00,$00,$00,$00,$01,$00,$00
+ db $00,$00,$00,$00,$00,$10,$00,$00
+ db $55,$55,$55,$55,$55,$00,$00,$00
+ db $00,$00,$00,$00,$00,$00,$00,$01
+ db $00,$00,$00,$00,$00,$00,$00,$10
+ db $00,$00,$00,$E0,$00,$00,$01,$00
+ db $00,$00,$00,$00,$00,$00,$10,$00
+ db $00,$00,$00,$00,$00,$01,$00,$00
+ db $00,$00,$00,$00,$00,$10,$00,$00
+ db $55,$45,$55,$55,$55,$55,$55,$55
+ db $00,$00,$30,$00,$08,$00,$00,$00
+ db $00,$00,$30,$00,$00,$00,$00,$00
+ db $00,$00,$30,$00,$00,$00,$00,$00
+ db $08,$00,$30,$00,$00,$00,$00,$00
+ db $55,$45,$50,$00,$00,$00,$55,$55
+ db $00,$00,$00,$00,$00,$01,$00,$00
+ db $00,$00,$00,$00,$00,$10,$00,$00
+ db $00,$00,$00,$00,$01,$00,$00,$00
+ db $00,$00,$00,$00,$10,$00,$00,$00
+ db $00,$00,$00,$01,$00,$00,$00,$00
+ db $00,$00,$00,$10,$00,$00,$00,$00
+ db $66,$66,$61,$00,$00,$00,$16,$66
+ dd 0,0
+ db $00,$00,$00,$00,$00,$01,$00,$00
+ dd 0,0
+ db $00,$00,$00,$00,$00,$10,$00,$00
+ dd 0,0
+ db $00,$00,$00,$00,$01,$00,$00,$00
+ dd 0,0
+ db $00,$00,$00,$00,$10,$00,$00,$00
+ db $0B,$00,$B0,$00,$00,$00,$00,$00
+ db $00,$00,$00,$01,$00,$00,$00,$00
+ dd 0,0
+level4
+ db $11,$11,$11,$21,$11,$14,$11,$21
+ dd 0,0
+ db $00,$00,$00,$00,$00,$0C,$00,$00
+ dd 0,0,0,0,0,0
+ db $00,$00,$00,$00,$00,$74,$70,$00
+ dd 0,0
+ db $00,$0C,$00,$00,$00,$00,$00,$00
+ dd 0,0,0,0,0,0
+ db $77,$70,$00,$00,$00,$00,$00,$00
+ dd 0,0
+ db $00,$00,$00,$00,$00,$0C,$00,$00
+ dd 0,0,0,0,0,0
+ db $00,$00,$00,$77,$70,$00,$00,$00
+ dd 0,0,0,0
+ db $00,$0B,$00,$00,$00,$0B,$00,$00
+ dd 0,0
+ db $00,$00,$00,$00,$00,$00,$80,$00
+ db $55,$55,$55,$55,$45,$55,$55,$55
+ dd 0,0
+ db $00,$00,$E0,$00,$00,$00,$E0,$00
+ dd 0,0,0,0,0,0
+ db $41,$11,$11,$11,$41,$11,$11,$11
+ dd 0,0,0,0,0,0,0,0
+ db $41,$00,$00,$00,$00,$00,$00,$01
+ dd 0,0,0,0,0,0,0,0
+ db $00,$00,$80,$00,$00,$00,$00,$00
+ db $33,$33,$33,$32,$33,$43,$33,$32
+ dd 0,0
+ db $00,$0C,$00,$00,$00,$00,$00,$00
+ dd 0,0,0,0,0,0
+ db $00,$00,$00,$00,$07,$47,$00,$00
+ dd 0,0
+ db $00,$00,$00,$00,$00,$00,$00,$0F
+ dd 0,0,0,0,0,0
+ db $11,$11,$00,$00,$00,$00,$11,$11
+ db $00,$00,$00,$0E,$00,$00,$00,$00
+ dd 0,0,0,0,0,0
+ db $00,$00,$11,$11,$11,$11,$00,$00
+ db $00,$0F,$00,$00,$00,$00,$00,$00
+ dd 0,0,0,0,0,0
+ db $11,$11,$00,$00,$00,$00,$11,$11
+ db $00,$00,$00,$00,$00,$0E,$00,$00
+ dd 0,0,0,0,0,0
+ db $00,$00,$11,$11,$11,$11,$00,$00
+ dd 0,0
+ db $00,$00,$00,$00,$00,$00,$90,$00
+ dd 0,0,0,0
+ db $11,$11,$00,$00,$00,$00,$11,$11
+ dd 0,0
+ db $00,$00,$A0,$00,$00,$00,$00,$00
+ dd 0,0,0,0
+ db $00,$00,$11,$11,$11,$11,$00,$00
+ dd 0,0
+ db $90,$00,$00,$00,$00,$00,$00,$00
+ dd 0,0,0,0
+ db $11,$11,$00,$00,$00,$00,$11,$11
+ dd 0,0
+ db $00,$00,$00,$00,$A0,$00,$00,$00
+ dd 0,0,0,0
+ db $00,$00,$11,$11,$11,$11,$00,$00
+ db $00,$01,$00,$00,$00,$00,$00,$00
+ db $00,$10,$00,$00,$00,$00,$00,$00
+ db $01,$00,$00,$00,$00,$00,$00,$00
+ db $10,$00,$00,$00,$00,$00,$00,$00
+ db $00,$00,$00,$00,$00,$00,$11,$11
+ db $00,$00,$00,$00,$00,$01,$00,$00
+ db $00,$00,$00,$00,$00,$10,$00,$00
+ db $00,$00,$00,$11,$11,$00,$00,$00
+ db $00,$00,$01,$00,$00,$00,$00,$00
+ db $00,$00,$10,$00,$00,$00,$00,$00
+ db $00,$01,$00,$00,$00,$00,$00,$00
+level5
+ db $10,$00,$00,$00,$00,$00,$00,$06
+ dd 0,0
+ db $C0,$00,$00,$00,$00,$00,$06,$60
+ dd 0,0
+ db $00,$00,$00,$00,$00,$06,$60,$00
+ dd 0,0
+ db $00,$00,$00,$00,$06,$60,$00,$00
+ dd 0,0
+ db $00,$00,$00,$06,$10,$00,$00,$00
+ dd 0,0
+ db $0C,$00,$06,$60,$00,$00,$00,$00
+ dd 0,0
+ db $00,$06,$60,$00,$00,$00,$00,$00
+ dd 0,0
+ db $00,$60,$00,$00,$00,$00,$00,$00
+ db $86,$00,$00,$00,$D0,$00,$00,$00
+ db $10,$00,$00,$00,$00,$00,$00,$06
+ dd 0,0
+ db $0C,$00,$00,$00,$00,$00,$06,$60
+ dd 0,0
+ db $00,$00,$00,$00,$00,$06,$60,$00
+ dd 0,0
+ db $00,$00,$00,$00,$06,$60,$00,$00
+ dd 0,0
+ db $00,$00,$00,$06,$10,$00,$00,$00
+ dd 0,0
+ db $0C,$00,$06,$60,$00,$00,$00,$00
+ dd 0,0
+ db $00,$06,$60,$00,$00,$00,$00,$00
+ dd 0,0
+ db $06,$60,$00,$00,$00,$00,$00,$00
+ db $80,$00,$00,$00,$D0,$00,$00,$00
+ db $10,$00,$00,$00,$00,$00,$00,$06
+ dd 0,0
+ db $0C,$00,$00,$00,$00,$00,$06,$60
+ dd 0,0
+ db $00,$00,$00,$00,$00,$06,$60,$00
+ dd 0,0
+ db $00,$00,$00,$00,$06,$60,$00,$00
+ dd 0,0
+ db $00,$00,$00,$06,$10,$00,$00,$00
+ dd 0,0
+ db $0C,$00,$06,$60,$00,$00,$00,$00
+ dd 0,0
+ db $00,$06,$60,$00,$00,$00,$00,$00
+ dd 0,0
+ db $06,$60,$00,$00,$00,$00,$00,$00
+ dd 0,0
+level6 ; *!*
+ db $13,$00,$00,$00,$00,$00,$00,$03
+ dd 0,0,0,0,0,0
+ db $00,$00,$10,$00,$00,$00,$10,$00
+ dd 0,0,0,0,0,0
+ db $10,$00,$00,$00,$10,$00,$00,$00
+ dd $0C,0,0,0,0,0
+ db $00,$00,$10,$00,$00,$00,$60,$00
+ dd 0,0,0,0,0,0
+ db $10,$00,$00,$00,$10,$00,$00,$00
+ dd 0,$0C,0,0,0,0
+ db $00,$00,$60,$00,$00,$00,$10,$00
+ dd 0,0,0,0,0,0
+ db $10,$00,$00,$00,$10,$00,$00,$00
+ dd $0C,0,0,0,0,0
+ db $00,$00,$10,$00,$00,$00,$60,$00
+ dd 0,0,0,0,0,0
+ db $10,$00,$00,$00,$10,$00,$00,$00
+ dd 0,$0C,0,0;,0,0
+ db $00,$00,$80,$00,$00,$00,$00,$00
+ db $00,$00,$60,$00,$00,$00,$10,$00
+ dd 0,0,0,0,0,0
+ db $10,$00,$00,$00,$10,$00,$00,$00
+ dd $0C,0,0,0,0,0
+ db $00,$00,$10,$00,$00,$00,$60,$00
+ dd 0,0,0,0,0,0
+ db $10,$00,$00,$00,$10,$00,$00,$00
+ dd 0,$0C,0,0,0,0
+ db $00,$00,$60,$00,$00,$00,$10,$00
+ dd 0,0,0,0,0,0
+ db $10,$00,$00,$00,$10,$00,$00,$00
+ dd $0C,0,0,0,0,0
+ db $00,$00,$10,$00,$00,$00,$60,$00
+ dd 0,0,0,0,0,0
+ db $10,$00,$00,$00,$10,$00,$00,$00
+ dd 0,$0C,0,0;,0,0
+ db $00,$00,$80,$00,$00,$00,$00,$00
+ db $00,$00,$60,$00,$00,$00,$10,$00
+ dd 0,0,0,0,0,0
+ db $10,$00,$00,$00,$10,$00,$00,$00
+ dd $0C,0,0,0,0,0
+ db $00,$00,$10,$00,$00,$00,$60,$00
+ dd 0,0,0,0,0,0
+ db $10,$00,$00,$00,$10,$00,$00,$00
+ dd 0,$0C,0,0,0,0
+ db $00,$00,$60,$00,$00,$00,$10,$00
+ dd 0,0,0,0,0,0
+ db $10,$00,$00,$00,$10,$00,$00,$00
+ dd $0C,0,0,0,0,0
+ db $00,$00,$10,$00,$00,$00,$60,$00
+ dd 0,0,0,0,0,0
+ db $00,$00,$00,$05,$15,$00,$00,$00
+ dd 0,$0A,0,0,0,0
+level7
+ db $13,$20,$00,$00,$00,$00,$00,$00
+ dd $20,0,$20,0,$20,$0C,$20,0,$20,0,$20,0
+ db $20,$07,$77,$77,$77,$77,$77,$00
+ dd $20,0,$20,0,$2C,0,$20,0,$20,0,$20,0
+ db $20,$00,$00,$00,$00,$00,$00,$13
+ db $20,$00,$00,$00,$00,$00,$00,$D0
+ db $20,$00,$0B,$00,$0B,$00,$00,$00
+ dd $20,0
+ dd $20,0
+ db $20,$00,$02,$31,$11,$32,$00,$00
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ db $23,$10,$00,$00,$00,$00,$00,$00
+ db $20,$80,$00,$00,$00,$00,$00,$00
+ db $20,$00,$00,$00,$00,$0F,$00,$00
+ dd $20,0
+ dd $20,0
+ db $20,$00,$00,$00,$80,$00,$00,$00
+ db $20,$00,$02,$31,$11,$32,$00,$00
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ db $20,$00,$00,$00,$00,$00,$00,$13
+ db $20,$00,$00,$00,$00,$00,$00,$80
+ db $20,$00,$0E,$00,$00,$00,$00,$00
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ db $20,$00,$02,$31,$11,$32,$00,$00
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ db $23,$10,$00,$00,$00,$00,$00,$00
+ db $20,$D0,$00,$00,$00,$00,$00,$00
+ dd $20,0
+ db $20,$00,$00,$00,$00,$09,$00,$00
+ dd $20,0
+ db $20,$00,$00,$00,$80,$00,$00,$00
+ db $20,$00,$02,$31,$11,$32,$00,$00
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ db $20,$00,$00,$00,$00,$00,$00,$13
+ db $20,$00,$00,$00,$00,$00,$00,$D0
+ dd $20,0
+ db $20,$00,$0A,$00,$00,$00,$00,$00
+ dd $20,0
+ dd $20,0
+ db $20,$00,$02,$31,$11,$32,$00,$00
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ db $23,$10,$00,$00,$00,$00,$00,$00
+ db $20,$80,$00,$00,$00,$00,$00,$00
+ dd $20,0
+ db $20,$00,$0B,$00,$0B,$00,$00,$00
+ dd $20,0
+ dd $20,0
+ db $20,$00,$02,$31,$11,$32,$00,$00
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ dd $20,0
+ db $20,$00,$00,$00,$00,$00,$00,$13
+ dd 0,0,0,0,0,0,0,0,0,0,0,0
+level8
+ db $12,$20,$00,$00,$00,$00,$00,$22
+ dd 0,0,0,0
+ db $00,$00,$00,$B0,$00,$00,$00,$00
+ dd 0,0
+ db $00,$00,$00,$23,$20,$00,$00,$00
+ dd 0,0
+ db $00,$0F,$00,$00,$00,$00,$00,$00
+ dd 0,0,0,0,0,0
+ db $00,$07,$77,$77,$77,$00,$00,$00
+ db $00,$00,$00,$00,$0D,$00,$00,$00
+ dd 0,0,0,0,0,0,0,0
+ db $00,$00,$00,$00,$00,$00,$04,$00
+ dd 0,0
+ db $00,$00,$00,$00,$04,$00,$00,$00
+ dd 0,0
+ db $00,$00,$00,$00,$0C,$00,$00,$00
+ dd 0,0,0,0,0,0
+ db $00,$00,$04,$00,$04,$00,$00,$00
+ dd 0,0,0,0,0,0,0,0,0,0,0,0
+ db $00,$00,$0C,$00,$00,$00,$00,$08
+ db $00,$00,$00,$00,$00,$00,$04,$55
+ dd 0,0,0,0,0,0
+ db $00,$00,$04,$00,$00,$00,$00,$00
+ dd 0,0,0,0
+ db $00,$00,$00,$B0,$00,$00,$00,$B0
+ dd 0,0,0,0
+ db $45,$55,$55,$55,$45,$55,$55,$55
+ dd 0,0
+ db $00,$00,$00,$00,$90,$00,$00,$00
+ dd 0,0
+ db $00,$00,$00,$00,$80,$00,$00,$00
+ db $45,$55,$55,$55,$55,$55,$55,$55
+ dd 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+ dd 0,0,0,0
+ db $00,$00,$23,$33,$40,$00,$00,$00
+ dd 0,0
+ db $F0,$00,$00,$00,$00,$00,$00,$00
+ dd 0,0,0,0,0,0
+ db $20,$00,$00,$00,$00,$00,$23,$33
+ dd 0,0
+ db $00,$00,$00,$00,$E0,$00,$00,$00
+ dd 0,0,0,0,0,0
+ db $00,$00,$23,$33,$20,$00,$00,$00
+ db $00,$00,$00,$00,$D0,$00,$00,$00
+ db $00,$00,$00,$0C,$00,$00,$00,$00
+ dd 0,0,0,0,0,0
+ db $02,$00,$00,$00,$00,$00,$00,$00
+ dd 0,0,0,0,0,0,0,0,0,0
+ db $00,$00,$20,$00,$00,$00,$00,$00
+ dd 0,0,0,0,0,0,0,0,0,0
+ db $00,$00,$00,$00,$40,$00,$00,$00
+ db $00,$00,$00,$05,$85,$00,$00,$00
+ db $00,$00,$00,$50,$00,$50,$00,$00
+ db $00,$00,$05,$00,$00,$05,$00,$00
+ db $00,$00,$50,$00,$00,$00,$50,$00
+ db $00,$05,$00,$00,$00,$00,$05,$00
+ db $00,$50,$00,$00,$00,$00,$00,$50
+ db $05,$00,$00,$00,$40,$00,$00,$05
+level9 ; EOF
+
+; datos tecnicos, menos artisticos
+
+ align 16
+colourmap db $00,$C0,$0C,$CC,$30,$F0,$3C,$FC,$03,$C3,$0F,$CF,$33,$F3,$3F,$FF ; I[0..15]->[I&1]<<6+[I&2]<<1+[I&4]<<2+[I&&8]>>3
+
+ align 32
+tower_gfs
+ dw tower_gfA3,tower_gfA2,tower_gfA1,tower_gfA0,tower_gfB7,tower_gfB6,tower_gfB5,tower_gfB4
+ dw tower_gfB3,tower_gfB2,tower_gfB1,tower_gfB0,tower_gfA7,tower_gfA6,tower_gfA5,tower_gfA4
+tower_gfs_
+
+ align 256
+posx3d
+ db 32+0,32+0,32-1,32-1,32-2,32-2,32-3,32-3,32-4,32-4,32-5,32-5,32-6,32-6,32-7,32-7
+ db 32-8,32-8,32-9,32-9,32-9,32-10,32-10,32-11,32-11,32-12,32-12,32-12,32-13,32-13,32-13,32-14
+ db 32-14,32-14,32-15,32-15,32-15,32-16,32-16,32-16,32-17,32-17,32-17,32-17,32-18,32-18,32-18,32-18
+ db 32-18,32-19,32-19,32-19,32-19,32-19,32-19,32-20,32-20,32-20,32-20,32-20,32-20,32-20,32-20,32-20
+
+ db 32-20,32-20,32-20,32-20,32-20,32-20,32-20,32-20,32-20,32-20,32-19,32-19,32-19,32-19,32-19,32-19
+ db 32-18,32-18,32-18,32-18,32-18,32-17,32-17,32-17,32-17,32-16,32-16,32-16,32-15,32-15,32-15,32-14
+ db 32-14,32-14,32-13,32-13,32-13,32-12,32-12,32-12,32-11,32-11,32-10,32-10,32-9,32-9,32-9,32-8
+ db 32-8,32-7,32-7,32-6,32-6,32-5,32-5,32-4,32-4,32-3,32-3,32-2,32-2,32-1,32-1,32+0
+
+ db 32+0,32+0,32+1,32+1,32+2,32+2,32+3,32+3,32+4,32+4,32+5,32+5,32+6,32+6,32+7,32+7
+ db 32+8,32+8,32+9,32+9,32+9,32+10,32+10,32+11,32+11,32+12,32+12,32+12,32+13,32+13,32+13,32+14
+ db 32+14,32+14,32+15,32+15,32+15,32+16,32+16,32+16,32+17,32+17,32+17,32+17,32+18,32+18,32+18,32+18
+ db 32+18,32+19,32+19,32+19,32+19,32+19,32+19,32+20,32+20,32+20,32+20,32+20,32+20,32+20,32+20,32+20
+
+ db 32+20,32+20,32+20,32+20,32+20,32+20,32+20,32+20,32+20,32+20,32+19,32+19,32+19,32+19,32+19,32+19
+ db 32+18,32+18,32+18,32+18,32+18,32+17,32+17,32+17,32+17,32+16,32+16,32+16,32+15,32+15,32+15,32+14
+ db 32+14,32+14,32+13,32+13,32+13,32+12,32+12,32+12,32+11,32+11,32+10,32+10,32+9,32+9,32+9,32+8
+ db 32+8,32+7,32+7,32+6,32+6,32+5,32+5,32+4,32+4,32+3,32+3,32+2,32+2,32+1,32+1,32+0
+
+ align 256
+tower_maps ; 4 patrones de 64 bytes: $C5(pos),$D5(neg),$D7(00),$DF(01),$E7(10),$EF(11)
+
+ db $EF,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$D7,$EF,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D7
+ db $EF,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$D7,$EF,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D7
+
+ db $E7,$DF,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$E7,$DF,$E7,$DF,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$E7,$DF
+ db $E7,$DF,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$E7,$DF,$E7,$DF,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$D5,$E7,$DF
+
+ db $C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$D5
+ db $C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$D5
+
+ db $C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5,$C5
+ db $D5,$D5,$D5,$D5,$D7,$D7,$D7,$D7,$D7,$D7,$D7,$D7,$EF,$EF,$EF,$EF,$EF,$EF,$EF,$EF,$D7,$D7,$D7,$D7,$D7,$D7,$D7,$D7,$D5,$D5,$D5,$D5
+
+tiletable = $7000
+spritemap = $E700
+spritemap_ = spritemap+256
+chip_temp = $EF00
+towerpush = $F700
+edgesdirt = $FF00
+
+ align 256
+sprites ; derecho,reves; (+1=runtime.flip)
+; 0..7: desintegracion o explosion: animacion al reves, parcialmente repetida
+ dw sprite3x+15*48,sprite3x+15*48
+ dw sprite3x+12*48,sprite3x+12*48
+ dw sprite3x+9*48,sprite3x+9*48
+ dw sprite3x+6*48,sprite3x+6*48
+ dw sprite3x+3*48,sprite3x+3*48
+ dw sprite3x,sprite3x
+ dw sprite3x+3*48,sprite3x+3*48
+ dw sprite3x,sprite3x
+; 8..15: reintegracion (cfr. explosion)
+ dw sprite3x+15*48,sprite3x+15*48
+ dw sprite3x+12*48,sprite3x+12*48
+ dw sprite3x+9*48,sprite3x+9*48
+ dw sprite3x+6*48,sprite3x+6*48
+ dw sprite3x+3*48,sprite3x+3*48
+ dw sprite3x,sprite3x
+ dw sprite3x+3*48,sprite3x+3*48
+ dw sprite3x,sprite3x
+; 16..19: lanzarote
+ dw sprite3x+21*48,sprite3x+21*48+1 ; LANZAROTE (1/3) ; CASO ESPECIAL: LENY=2
+ dw sprite3x+23*48,sprite3x+23*48+1 ; LANZAROTE (2/3)
+ dw sprite3x+26*48,sprite3x+26*48+1 ; LANZAROTE (3/3) ; CASO ESPECIAL: LENY=2+1
+ dw sprite3x+23*48,sprite3x+23*48+1 ; LANZAROTE (2/3)
+; 20..23: condensador+ginebra
+ dw sprite3x+29*48,sprite3x+29*48 ; CONDENSADOR (1/3) ; CASO ESPECIAL: LENX=2
+ dw sprite3x+31*48,sprite3x+31*48 ; CONDENSADOR (2/3) ; "
+ dw sprite3x+33*48,sprite3x+33*48 ; CONDENSADOR (3/3) ; "
+ dw sprite3x+18*48,sprite3x+18*48+1 ; GINEBRA
+; 24...
+ dd 0 ; relleno
+ dd 0 ; relleno
+ dd 0 ; relleno
+ dd 0 ; relleno
+; 28...
+ dw sprite3x+44*48,sprite3x+44*48+0 ; MANO DE PIEDRA (1/4)
+ dw sprite3x+44*48,sprite3x+44*48+0 ; MANO DE PIEDRA (2/4)
+ dw sprite3x+44*48,sprite3x+44*48+0 ; MANO DE PIEDRA (3/4)
+ dw sprite3x+44*48,sprite3x+44*48+0 ; MANO DE PIEDRA (4/4)
+; 32...
+ dw sprite3x+47*48,sprite3x+47*48+1 ; BOLA (1/4)
+ dw sprite3x+47*48+1,sprite3x+47*48 ; BOLA (2/4)
+ dw sprite3x+50*48,sprite3x+50*48+1 ; BOLA (3/4)
+ dw sprite3x+50*48+1,sprite3x+50*48 ; BOLA (4/4)
+; 36...
+ dw sprite3x+53*48,sprite3x+53*48+1 ; CARACOL (1/4)
+ dw sprite3x+53*48,sprite3x+53*48+1 ; CARACOL (2/4)
+ dw sprite3x+56*48,sprite3x+56*48+1 ; CARACOL (3/4)
+ dw sprite3x+56*48,sprite3x+56*48+1 ; CARACOL (4/4)
+; 40...
+ dw sprite3x+59*48,sprite3x+59*48+0 ; CALABAZA (1/4)
+ dw sprite3x+62*48,sprite3x+62*48+0 ; CALABAZA (2/4)
+ dw sprite3x+59*48+0,sprite3x+59*48 ; CALABAZA (3/4)
+ dw sprite3x+62*48+0,sprite3x+62*48 ; CALABAZA (4/4)
+; 44...
+ dw sprite3x+65*48,sprite3x+65*48+1 ; FANTASMA (1/4)
+ dw sprite3x+65*48,sprite3x+65*48+1 ; FANTASMA (2/4)
+ dw sprite3x+68*48,sprite3x+68*48+1 ; FANTASMA (3/4)
+ dw sprite3x+68*48,sprite3x+68*48+1 ; FANTASMA (4/4)
+; 48...
+ dw sprite3x+71*48,sprite3x+71*48+0 ; "SLIME" (1/4)
+ dw sprite3x+74*48,sprite3x+74*48+0 ; "SLIME" (2/4)
+ dw sprite3x+77*48,sprite3x+77*48+0 ; "SLIME" (3/4)
+ dw sprite3x+74*48,sprite3x+74*48+0 ; "SLIME" (4/4)
+; 52...
+ dw sprite3x+80*48,sprite3x+80*48+1 ; GUARDIA (1/3) ; CASO ESPECIAL: LENY=4
+ dw sprite3x+84*48,sprite3x+84*48+1 ; GUARDIA (2/3) ; "
+ dw sprite3x+88*48,sprite3x+88*48+1 ; GUARDIA (3/3) ; "
+ dw sprite3x+104*48,sprite3x+104*48+1 ; ESPADA ; CASO ESPECIAL: LENY=1
+; 56...
+ dw sprite3x+92*48,sprite3x+92*48+1 ; BRUJO (1/3) ; CASO ESPECIAL: LENY=4
+ dw sprite3x+96*48,sprite3x+96*48+1 ; BRUJO (2/3) ; "
+ dw sprite3x+100*48,sprite3x+100*48+1 ; BRUJO (3/3) ; "
+ dw sprite3x+105*48,0 ; LUNA
+; 60...
+ dw sprite3x+35*48,sprite3x+35*48+0 ; HECHIZO (1/4)
+ dw sprite3x+38*48,sprite3x+38*48+1 ; HECHIZO (2/4)
+ dw sprite3x+41*48+0,sprite3x+41*48 ; HECHIZO (3/4)
+ dw sprite3x+38*48+1,sprite3x+38*48 ; HECHIZO (4/4)
+
+ align 512
+graphics
+ include "frogalot.inc"
+frogalot = graphics+48*16
+sprite3x = frogalot+24*48
+
+; ==== FIN DEL PROGRAMA! ====
+
+last ; cfr. CABECERA DE AMSDOS
+ end
